@@ -83,7 +83,8 @@ void perform(const connection::output& out, bool& is_connected) {
     std::println("  -> action {}", a.id);
   }
   for (const auto& e : out.events)
-    spl::visit(spl::overloaded{[](const connection::event::confirmed& x) { std::println("event: confirmed, their info: {}", shown(x.info)); },
+    spl::visit(spl::overloaded{[](const connection::event::invitation&) { std::println("event: an invitation (not the joining side's)"); },
+                               [](const connection::event::confirmed& x) { std::println("event: confirmed, their info: {}", shown(x.info)); },
                                [&](const connection::event::connected&) {
                                  std::println("event: connected");
                                  is_connected = true;
