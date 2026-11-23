@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// quay.connection against simplex-chat's CLI: its invitation joined by the
+// state machine alone -- its actions sent, the router's answers and
+// deliveries fed back, its events printed -- and a message sent once
+// connected. Over plain TCP to a TLS relay in front of the router.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+import std;
+import splice;
+import quay.bytes;
+import quay.crypto;
+import quay.smp;
+import quay.ratchet;
+import quay.agent;
+import quay.connection;
+
+using namespace quay;
+
+namespace {
+int fd = -1;
+std::uint16_t agreed = 0;
+bytes session;
+crypto::system_random rng;
+std::map<smp::corr_id, std::uint64_t> pending;
+void send_all(std::span<const byte> data) {
+  while (!data.empty()) {
+    const auto n = ::send(fd, data.data(), data.size(), 0);
+    if (n <= 0) throw std::runtime_error("send failed");
+    data = data.subspan(static_cast<std::size_t>(n));
+  }
+}
+bytes read_block() {
+  bytes out(smp::block_size);
+  std::size_t got = 0;
+  while (got < out.size()) {
+    const auto n = ::recv(fd, out.data() + got, out.size() - got, 0);
+    if (n <= 0) throw std::runtime_error(n == 0 ? "closed" : "quiet for 20 seconds");
+    got += static_cast<std::size_t>(n);
+  }
+  return out;
+}
+std::string shown(std::span<const byte> b) {
+  std::string out;
+  for (const byte c : b.first(std::min<std::size_t>(200, b.size()))) out += (c >= 32 && c < 127) ? static_cast<char>(c) : '.';
+  return out;
+}
+void perform(const connection::output& out, bool& is_connected) {
+  for (const auto& a : out.actions) {
+    smp::corr_id c{};
+    rng(std::span<byte>(c));
+    pending[c] = a.id;
+    const auto t = connection::transmission_of(a, session, c);
+    send_all(*smp::block_of(std::span(&t, 1), agreed));
+    std::println("  -> action {}", a.id);
+  }
+  for (const auto& e : out.events)
+    spl::visit(spl::overloaded{[](const connection::event::confirmed& x) { std::println("event: confirmed, their info: {}", shown(x.info)); },
+                               [&](const connection::event::connected&) {
+                                 std::println("event: connected");
+                                 is_connected = true;
+                               },
+                               [](const connection::event::message& x) {
+                                 std::println("event: message {}{}: {}", x.id, x.in_sequence ? "" : " (out of sequence)", shown(x.body));
+                               },
+                               [](const connection::event::received& x) { std::println("event: receipt for our message {}", x.id); },
+                               [](const connection::event::other&) { std::println("event: another agent message"); },
+                               [](const connection::event::failed& x) { std::println("event: FAILED: {}", x.what); }},
+               e);
+}
+}  // namespace
+
+int main(int, char** argv) {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  try {
+    std::ifstream file(argv[1]);
+    const std::string text((std::istreambuf_iterator<char>(file)), {});
+    const auto link = agent::link_of(text);
+    const auto& inv = *link->template get_if<agent::link::invitation>();
+    sockaddr_in where{};
+    where.sin_family = AF_INET;
+    where.sin_port = htons(15224);
+    inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
+    fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    timeval wait{20, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
+    // The one place a C API asks for its own pointer type: sockaddr*.
+    if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
+    const auto hello = smp::router_hello_of(read_block());
+    agreed = *smp::agreed_version(hello->versions);
+    session = hello->session_id;
+    const auto router = inv.queues.front().address.router;
+    send_all(*smp::client_hello(agreed, router.identity));
+
+    const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay state machine","fullName":""}}})";
+    auto joined = connection::joining::join(inv, router, bytes(profile.begin(), profile.end()), rng);
+    if (!joined) throw std::runtime_error(joined.error());
+    auto& [conn, first] = *joined;
+    bool is_connected = false, sent = false;
+    perform(first, is_connected);
+    for (int i = 0; i < 40; ++i) {
+      bytes block;
+      try {
+        block = read_block();
+      } catch (const std::exception& e) {
+        std::println("({})", e.what());
+        break;
+      }
+      for (const auto& t : *smp::transmissions_of(block, agreed)) {
+        const auto r = smp::response_of(t.body);
+        if (!r) continue;
+        if (const auto* m = r->template get_if<smp::response::message>()) {
+          perform(conn.delivered(*m, rng), is_connected);
+        } else if (t.correlation && pending.contains(*t.correlation)) {
+          perform(conn.answered(pending[*t.correlation], *r, rng), is_connected);
+        }
+      }
+      if (is_connected && !sent) {
+        const std::string chat = R"({"v":"1-22","msgId":"cXVheXN0YXRlbWFj","event":"x.msg.new","params":{"content":{"type":"text","text":"hello from quay.connection"}}})";
+        auto out = conn.send(bytes(chat.begin(), chat.end()), rng);
+        if (!out) throw std::runtime_error(out.error());
+        std::println("sending our message {}", out->first);
+        perform(out->second, is_connected);
+        sent = true;
+      }
+    }
+    std::println("live connection: {}", is_connected && sent ? "passed" : "FAILED");
+    return is_connected && sent ? 0 : 1;
+  } catch (const std::exception& failed) {
+    std::println("live connection: FAILED: {}", failed.what());
+    return 1;
+  }
+}

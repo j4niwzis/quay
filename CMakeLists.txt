@@ -92,7 +92,7 @@ set_target_properties(quay_sntrup761 PROPERTIES POSITION_INDEPENDENT_CODE ON CXX
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/connection.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice quay_botan PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
