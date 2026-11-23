@@ -105,10 +105,16 @@ static_assert([] {
   sent.push_back(transmission{bytes{}, c, bytes{}, of("PING")});
   sent.push_back(transmission{bytes(64, 5), c, bytes{1, 2, 3}, of("SUB")});
   sent.push_back(transmission{bytes{}, std::nullopt, bytes{4}, of("END")});  // a notification: no correlation id
-  const auto block = block_of(sent);
-  if (!block || block->size() != block_size) return false;
-  const auto back = transmissions_of(*block);
-  return back && *back == sent;
+  for (const std::uint16_t version : {std::uint16_t{15}, std::uint16_t{18}, std::uint16_t{23}}) {
+    const auto block = block_of(sent, version);
+    if (!block || block->size() != block_size) return false;
+    const auto back = transmissions_of(*block, version);
+    if (!back || *back != sent) return false;
+  }
+  // From v16 an authorized transmission has its service signature's place: one byte more.
+  bytes v15, v16;
+  put_transmission(v15, sent[1], 15), put_transmission(v16, sent[1], 16);
+  return v16.size() == v15.size() + 1 && v16[65] == '0';
 }());
 
 // The handshake: a router's hello read; the client's written.

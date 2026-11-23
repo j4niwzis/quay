@@ -20,6 +20,11 @@ export namespace quay::smp {
 
 inline constexpr std::size_t block_size = 16384;
 inline constexpr std::uint16_t min_version = 6, max_version = 23;
+// From v16 every authorized transmission has a place for a client service's
+// signature: '0' where there is none, '1' and the signature where there is.
+// (The spec's text calls it present only in service sessions; simplexmq's
+// own parser -- transmissionP, serviceAuth = v >= 16 -- reads it always.)
+inline constexpr std::uint16_t service_signature_version = 16;
 inline constexpr std::size_t max_message_length = 16048;     // smpEncMessage, v11+
 inline constexpr std::size_t e2e_message_length = 16000;      // padded smpClientMessage
 inline constexpr std::size_t e2e_confirmation_length = 15904; // padded smpConfirmation
@@ -751,22 +756,24 @@ constexpr void put_authorized(Out& out, std::span<const byte> session_id, const 
   (void)put_short(out, session_id);
   put_unsigned_part(out, correlation, entity, body);
 }
-// A transmission's bytes on the wire: the session identifier left out
-// whole -- not even its length -- as from v7.
+// A transmission's bytes on the wire, for the version agreed: the session
+// identifier left out whole -- not even its length -- as from v7; and from
+// v16, after an authorization, no service signature ('0').
 template <byte_sink Out>
-constexpr void put_transmission(Out& out, const transmission& t) {
+constexpr void put_transmission(Out& out, const transmission& t, std::uint16_t version) {
   (void)put_short(out, t.authorization);
+  if (version >= service_signature_version && !t.authorization.empty()) put_byte(out, '0');
   put_unsigned_part(out, t.correlation, t.entity, t.body);
 }
 // Transmissions in a padded block: their count, each with its length.
 // Too many for one block: nothing written.
-[[nodiscard]] constexpr std::expected<bytes, decode_error> block_of(std::span<const transmission> all) {
+[[nodiscard]] constexpr std::expected<bytes, decode_error> block_of(std::span<const transmission> all, std::uint16_t version) {
   bytes content;
   if (all.empty() || all.size() > 255) return std::unexpected(errors::too_long{all.size()});
   put_byte(content, static_cast<byte>(all.size()));
   for (const auto& t : all) {
     bytes one;
-    put_transmission(one, t);
+    put_transmission(one, t, version);
     if (one.size() > 65535) return std::unexpected(errors::too_long{one.size()});
     put_u16(content, static_cast<std::uint16_t>(one.size()));
     put_bytes(content, one);
@@ -775,8 +782,9 @@ constexpr void put_transmission(Out& out, const transmission& t) {
   if (auto padded = put_padded(block, content, block_size); !padded) return std::unexpected(padded.error());
   return block;
 }
-// A block's transmissions, read (a router's: no service signature).
-[[nodiscard]] constexpr std::expected<std::vector<transmission>, decode_error> transmissions_of(std::span<const byte> block) {
+// A block's transmissions, read, for the version agreed.
+[[nodiscard]] constexpr std::expected<std::vector<transmission>, decode_error> transmissions_of(std::span<const byte> block,
+                                                                                              std::uint16_t version) {
   const auto content = unpadded(block);
   if (!content) return std::unexpected(content.error());
   auto in = reader_of(*content);
@@ -793,6 +801,15 @@ constexpr void put_transmission(Out& out, const transmission& t) {
     auto auth = t.short_string();
     if (!auth) return std::unexpected(auth.error());
     got.authorization = std::move(*auth);
+    if (version >= service_signature_version && !got.authorization.empty()) {
+      const auto flag = t.u8();
+      if (!flag) return std::unexpected(flag.error());
+      if (*flag == '1') {
+        if (auto sig = t.short_string(); !sig) return std::unexpected(sig.error());
+      } else if (*flag != '0') {
+        return std::unexpected(errors::bad_flag{});
+      }
+    }
     const auto corr_length = t.u8();
     if (!corr_length) return std::unexpected(corr_length.error());
     if (*corr_length == 24) {

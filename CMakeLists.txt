@@ -130,4 +130,12 @@ if(QUAY_TESTS)
     target_link_libraries(quay-${name}-test PRIVATE quay ${quay_gtest})
     add_test(NAME ${name} COMMAND quay-${name}-test)
   endforeach()
+  # Against a real router (CI runs smp-server, and a TLS relay in front of
+  # it: tools/tls_proxy.py): QUAY_SMP_ADDRESS, QUAY_SMP_FINGERPRINT.
+  option(QUAY_LIVE_TESTS "Test against a running smp-server" OFF)
+  if(QUAY_LIVE_TESTS)
+    add_executable(quay-live-smp test/live_smp.cc)
+    target_link_libraries(quay-live-smp PRIVATE quay)
+    add_test(NAME live_smp COMMAND quay-live-smp)
+  endif()
 endif()
