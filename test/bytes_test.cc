@@ -69,15 +69,15 @@ static_assert([] {
   const auto any = any_key_from_spki(der);
   return any && any->template get_if<public_key<curve::ed25519>>() != nullptr;
 }());
-// base64url, both ways (RFC 4648's vectors, unpadded).
+// base64url, both ways (RFC 4648's vectors), written padded.
 static_assert([] {
   const auto enc = [](std::string_view s) {
     std::string out;
     put_base64url(out, s);
     return out;
   };
-  return enc("") == "" && enc("f") == "Zg" && enc("fo") == "Zm8" && enc("foo") == "Zm9v" && enc("foob") == "Zm9vYg" &&
-         enc("fooba") == "Zm9vYmE" && enc("foobar") == "Zm9vYmFy" && enc("\xfb\xff") == "-_8";
+  return enc("") == "" && enc("f") == "Zg==" && enc("fo") == "Zm8=" && enc("foo") == "Zm9v" && enc("foob") == "Zm9vYg==" &&
+         enc("fooba") == "Zm9vYmE=" && enc("foobar") == "Zm9vYmFy" && enc("\xfb\xff") == "-_8=";
 }());
 static_assert(base64url_decode("Zm9vYmFy") == of("foobar") && base64url_decode("Zm9vYg==") == of("foob") && !base64url_decode("Z") &&
               !base64url_decode("Zm9v*"));

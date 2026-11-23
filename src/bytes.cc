@@ -248,8 +248,10 @@ template <class Curve>
 
 // ---- base64url ----------------------------------------------------------------
 
-// Base64url without padding (RFC 4648, 5): how SimpleX's URIs carry keys
-// and ids. Encoded lazily into a sink of characters; decoded into bytes.
+// Base64url (RFC 4648, 5), with its '=' padding: how SimpleX's URIs and
+// links carry keys and ids -- simplexmq writes it padded and reads it only
+// so. Encoded lazily into a sink of characters; decoded into bytes, padded
+// or not.
 template <class Out, std::ranges::input_range R>
 constexpr void put_base64url(Out& out, R&& what) {
   constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -262,8 +264,8 @@ constexpr void put_base64url(Out& out, R&& what) {
       held = 0, count = 0;
     }
   }
-  if (count == 1) held <<= 16, out.push_back(alphabet[(held >> 18) & 63]), out.push_back(alphabet[(held >> 12) & 63]);
-  if (count == 2) held <<= 8, out.push_back(alphabet[(held >> 18) & 63]), out.push_back(alphabet[(held >> 12) & 63]), out.push_back(alphabet[(held >> 6) & 63]);
+  if (count == 1) held <<= 16, out.push_back(alphabet[(held >> 18) & 63]), out.push_back(alphabet[(held >> 12) & 63]), out.push_back('='), out.push_back('=');
+  if (count == 2) held <<= 8, out.push_back(alphabet[(held >> 18) & 63]), out.push_back(alphabet[(held >> 12) & 63]), out.push_back(alphabet[(held >> 6) & 63]), out.push_back('=');
 }
 // Padding '=' and the standard alphabet's + and / taken too, as some write them.
 [[nodiscard]] constexpr std::optional<bytes> base64url_decode(std::string_view text) {
