@@ -50,10 +50,30 @@ struct system_random {
   void operator()(std::span<byte> out) const { Botan::system_rng().randomize(out); }
 };
 
+// Bytes wiped where they are let go (Botan's secure_scrub_memory): what a
+// secret's storage held is not left in freed memory.
+inline void scrub(std::span<byte> bytes) { Botan::secure_scrub_memory(bytes.data(), bytes.size()); }
+// A secret of N bytes: an array, wiped when it goes. Copied where it must
+// be; each copy wiped in turn.
+template <std::size_t N>
+struct secret {
+  std::array<byte, N> raw{};
+  secret() = default;
+  secret(const secret&) = default;
+  secret& operator=(const secret&) = default;
+  ~secret() { scrub(raw); }
+  friend bool operator==(const secret&, const secret&) = default;
+  friend auto operator<=>(const secret& a, const secret& b) { return a.raw <=> b.raw; }
+};
+
 template <class Curve>
 struct private_key {
   std::array<byte, Curve::private_size> raw{};
-  friend constexpr bool operator==(const private_key&, const private_key&) = default;
+  private_key() = default;
+  private_key(const private_key&) = default;
+  private_key& operator=(const private_key&) = default;
+  ~private_key() { scrub(raw); }
+  friend bool operator==(const private_key&, const private_key&) = default;
 };
 template <class Curve>
 struct key_pair {
@@ -67,10 +87,13 @@ struct signature {
 };
 
 namespace detail {
+// What Botan gave, as the array it must be: a size other than N is a bug,
+// said, not padded or cut.
 template <std::size_t N>
 std::array<byte, N> array_of(std::span<const std::uint8_t> from) {
+  if (from.size() != N) throw std::logic_error(std::format("quay.crypto: {} bytes where {} were due", from.size(), N));
   std::array<byte, N> out{};
-  std::ranges::copy(from.first(std::min(N, from.size())), out.begin());
+  std::ranges::copy(from, out.begin());
   return out;
 }
 inline bytes owned(std::span<const std::uint8_t> from) { return bytes(from.begin(), from.end()); }

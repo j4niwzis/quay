@@ -22,9 +22,12 @@ export namespace quay::ratchet {
 
 inline constexpr std::uint16_t kdf_x3dh_version = 2, pq_version = 3, current_version = 3;
 inline constexpr std::uint32_t max_skip = 512;
+// And skipped keys held in all, whatever the steps: a peer stepping the
+// ratchet again and again cannot make them grow without end.
+inline constexpr std::size_t max_skipped_total = 2048;
 
-using key32 = std::array<byte, 32>;
-using iv16 = std::array<byte, 16>;
+using key32 = crypto::secret<32>;
+using iv16 = crypto::secret<16>;
 using x448_private = crypto::private_key<curve::x448>;
 using x448_public = public_key<curve::x448>;
 
@@ -191,7 +194,7 @@ inline std::array<bytes, 3> hkdf3(std::span<const byte> salt, std::span<const by
 }
 inline key32 key_of(const bytes& b) {
   key32 k{};
-  std::ranges::copy(std::span(b).first(32), k.begin());
+  std::ranges::copy(std::span(b).first(32), k.raw.begin());
   return k;
 }
 inline std::expected<bytes, ratchet_error> dh(const x448_public& theirs, const x448_private& mine) {
@@ -290,24 +293,49 @@ struct state {
   key32 next_send_header{}, next_receive_header{};
   // Keys of messages skipped, by the header key they came under and their number.
   std::map<key32, std::map<std::uint32_t, message_key>> skipped;
+
+  // Move-only: encrypting from an old copy would use a message key and IV
+  // again -- the state is moved, not copied. The caller keeps the state as
+  // it is after encrypt() before what encrypt() gave is sent.
+  state() = default;
+  state(state&&) = default;
+  state& operator=(state&&) = default;
+  state(const state&) = delete;
+  state& operator=(const state&) = delete;
+  // A copy where one is meant: decrypt() tries a step on one.
+  [[nodiscard]] state clone() const {
+    state out;
+    out.current = current, out.max_supported = max_supported, out.associated = associated, out.dh_own = dh_own, out.kem = kem;
+    out.support_kem = support_kem, out.enable_kem = enable_kem, out.send_kem = send_kem, out.receive_kem = receive_kem;
+    out.root = root, out.send = send, out.receive = receive, out.ns = ns, out.nr = nr, out.pn = pn;
+    out.next_send_header = next_send_header, out.next_receive_header = next_receive_header, out.skipped = skipped;
+    return out;
+  }
 };
 
 namespace detail {
-inline std::tuple<key32, key32, key32> root_kdf(const key32& root, const x448_public& theirs, const x448_private& mine,
-                                                const std::optional<crypto::sntrup761::shared_secret>& kem) {
-  auto secret = dh(theirs, mine).value_or(bytes(56, 0));
-  if (kem) secret.insert(secret.end(), kem->begin(), kem->end());
-  const auto [rk, ck, nhk] = hkdf3(root, secret, "SimpleXRootRatchet");
-  return {key_of(rk), key_of(ck), key_of(nhk)};
+// A DH that fails (a low-order point) is refused here, as the initial
+// agreement refuses it; simplexmq does not check, and would go on with
+// what X448 gave.
+inline std::expected<std::tuple<key32, key32, key32>, ratchet_error> root_kdf(const key32& root, const x448_public& theirs, const x448_private& mine,
+                                                                             const std::optional<crypto::sntrup761::shared_secret>& kem) {
+  auto secret = dh(theirs, mine);
+  if (!secret) return std::unexpected(secret.error());
+  if (kem) secret->insert(secret->end(), kem->begin(), kem->end());
+  const auto [rk, ck, nhk] = hkdf3(root.raw, *secret, "SimpleXRootRatchet");
+  crypto::scrub(*secret);
+  return std::tuple{key_of(rk), key_of(ck), key_of(nhk)};
 }
 inline std::tuple<key32, message_key, iv16> chain_kdf(const key32& chain) {
-  const auto [ck, mk, ivs] = hkdf3(std::span<const byte>(), chain, "SimpleXChainRatchet");
+  auto [ck, mk, ivs] = hkdf3(std::span<const byte>(), chain.raw, "SimpleXChainRatchet");
   message_key m;
   m.key = key_of(mk);
-  std::ranges::copy(std::span(ivs).first(16), m.iv.begin());
+  std::ranges::copy(std::span(ivs).first(16), m.iv.raw.begin());
   iv16 header_iv{};
-  std::ranges::copy(std::span(ivs).subspan(16, 16), header_iv.begin());
-  return {key_of(ck), m, header_iv};
+  std::ranges::copy(std::span(ivs).subspan(16, 16), header_iv.raw.begin());
+  key32 next = key_of(ck);
+  crypto::scrub(ck), crypto::scrub(mk), crypto::scrub(ivs);
+  return {next, m, header_iv};
 }
 inline std::size_t padded_header_length(std::uint16_t version, bool support_kem) { return support_kem && version >= pq_version ? 2310 : 88; }
 template <class Out>
@@ -318,6 +346,8 @@ void put_versioned_length(Out& out, std::uint16_t version, std::span<const byte>
 template <class R>
 std::expected<bytes, decode_error> read_versioned_length(R& in, std::span<const byte> rest) {
   // A first byte below 32: a two-byte length (a header is never that short).
+  // Upstream reads it so too (Ratchet.hs largeP), so that a message can
+  // carry a version upgrade; it is written by version (put_versioned_length).
   if (!rest.empty() && rest.front() < 32) return in.large_string();
   return in.short_string();
 }
@@ -330,8 +360,11 @@ inline state sending_ratchet(std::uint16_t current, std::uint16_t max_supported,
   s.current = current, s.max_supported = max_supported;
   s.associated = params.associated;
   s.dh_own = own_dh;
-  const auto [rk, cks, nhks] = detail::root_kdf(params.root, their_key2, own_dh,
-                                                params.kem ? std::optional(params.kem->shared) : std::nullopt);
+  // (The agreement refused a failing DH already: this one, with the same
+  // keys' second halves, is only refused where the other's key is bad.)
+  auto stepped = detail::root_kdf(params.root, their_key2, own_dh, params.kem ? std::optional(params.kem->shared) : std::nullopt);
+  if (!stepped) throw std::invalid_argument("quay.ratchet: the other side's ratchet key agrees on nothing");
+  auto [rk, cks, nhks] = *stepped;
   s.root = rk;
   s.send = state::sending{their_key2, cks, params.send_header};
   s.next_send_header = nhks;
@@ -382,10 +415,10 @@ std::expected<bytes, ratchet_error> encrypt(state& s, std::span<const byte> plai
   put_u32(header, s.ns);
   bytes padded_header;
   if (auto ok = put_padded(padded_header, header, detail::padded_header_length(v, s.support_kem)); !ok) return std::unexpected(ok.error());
-  const auto sealed_header = crypto::gcm_seal(s.send->header, header_iv, s.associated, padded_header);
+  const auto sealed_header = crypto::gcm_seal(s.send->header.raw, header_iv.raw, s.associated, padded_header);
   bytes enc_header;
   put_u16(enc_header, v);
-  put_bytes(enc_header, header_iv);
+  put_bytes(enc_header, header_iv.raw);
   put_bytes(enc_header, sealed_header.tag);
   detail::put_versioned_length(enc_header, v, sealed_header.cipher);
   // The body, its associated data the ratchet's and the encrypted header.
@@ -393,7 +426,7 @@ std::expected<bytes, ratchet_error> encrypt(state& s, std::span<const byte> plai
   if (auto ok = put_padded(padded_body, plain, padded_length); !ok) return std::unexpected(ok.error());
   bytes body_ad = s.associated;
   body_ad.insert(body_ad.end(), enc_header.begin(), enc_header.end());
-  const auto sealed_body = crypto::gcm_seal(key.key, key.iv, body_ad, padded_body);
+  const auto sealed_body = crypto::gcm_seal(key.key.raw, key.iv.raw, body_ad, padded_body);
   bytes out;
   detail::put_versioned_length(out, v, enc_header);
   put_bytes(out, sealed_body.tag);
@@ -412,7 +445,7 @@ struct header {
 };
 struct parsed_message {
   std::uint16_t version = 0;
-  iv16 header_iv{};
+  std::array<byte, 16> header_iv{};
   crypto::gcm_tag header_tag{};
   bytes header_cipher;
   bytes enc_header;  // as it came: the body's associated data
@@ -444,7 +477,7 @@ inline std::expected<parsed_message, ratchet_error> parse(std::span<const byte> 
   return out;
 }
 inline std::optional<header> open_header(const key32& key, const bytes& associated, const parsed_message& m) {
-  const auto plain = crypto::gcm_open(key, m.header_iv, associated, m.header_cipher, m.header_tag);
+  const auto plain = crypto::gcm_open(key.raw, m.header_iv, associated, m.header_cipher, m.header_tag);
   if (!plain) return std::nullopt;
   const auto inner = unpadded(*plain);
   if (!inner) return std::nullopt;
@@ -469,7 +502,7 @@ inline std::optional<header> open_header(const key32& key, const bytes& associat
 inline std::expected<bytes, ratchet_error> open_body(const message_key& key, const bytes& associated, const parsed_message& m) {
   bytes ad = associated;
   ad.insert(ad.end(), m.enc_header.begin(), m.enc_header.end());
-  const auto plain = crypto::gcm_open(key.key, key.iv, ad, m.body_cipher, m.body_tag);
+  const auto plain = crypto::gcm_open(key.key.raw, key.iv.raw, ad, m.body_cipher, m.body_tag);
   if (!plain) return std::unexpected(ratchet_error(plain.error()));
   const auto inner = unpadded(*plain);
   if (!inner) return std::unexpected(inner.error());
@@ -481,6 +514,9 @@ inline std::expected<void, ratchet_error> skip(state& s, std::uint32_t until) {
   if (s.nr > until + 1) return std::unexpected(errors::earlier{s.nr - until - 1});
   if (s.nr == until + 1) return std::unexpected(errors::duplicate{});
   if (s.nr + max_skip < until) return std::unexpected(errors::too_many_skipped{until + 1 - s.nr});
+  std::size_t held = 0;
+  for (const auto& [hk, keys] : s.skipped) held += keys.size();
+  if (held + (until - s.nr) > max_skipped_total) return std::unexpected(errors::too_many_skipped{until + 1 - s.nr});
   auto& keys = s.skipped[s.receive->header];
   while (s.nr < until) {
     const auto [chain, key, ignored] = chain_kdf(s.receive->chain);
@@ -514,7 +550,7 @@ std::expected<bytes, ratchet_error> decrypt(state& s, std::span<const byte> wire
     }
     break;
   }
-  state next = s;
+  state next = s.clone();
   bool step = false;
   std::optional<detail::header> h;
   if (next.receive) h = detail::open_header(next.receive->header, next.associated, *parsed);
@@ -554,8 +590,12 @@ std::expected<bytes, ratchet_error> decrypt(state& s, std::span<const byte> wire
       }
     }
     const auto fresh = crypto::generate<curve::x448>(random);
-    const auto [rk1, ckr, nhkr] = detail::root_kdf(next.root, h->dh, next.dh_own, received_secret);
-    const auto [rk2, cks, nhks] = detail::root_kdf(rk1, h->dh, fresh.priv, sent_secret);
+    const auto first = detail::root_kdf(next.root, h->dh, next.dh_own, received_secret);
+    if (!first) return std::unexpected(first.error());
+    const auto [rk1, ckr, nhkr] = *first;
+    const auto second = detail::root_kdf(rk1, h->dh, fresh.priv, sent_secret);
+    if (!second) return std::unexpected(second.error());
+    const auto [rk2, cks, nhks] = *second;
     next.enable_kem = sent_secret.has_value() || received_secret.has_value() || kem_next.has_value();
     next.support_kem = next.support_kem || (next.current >= pq_version && next.enable_kem);
     next.send_kem = sent_secret.has_value();
