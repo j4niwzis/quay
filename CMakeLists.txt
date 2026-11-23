@@ -39,7 +39,7 @@ set(QUAY_CONSTEXPR_STEPS 100000000 CACHE STRING
 set(QUAY_BOTAN_VERSION 3.14.1)
 set(QUAY_BOTAN_SHA256 d1046b8f5b18b80197cd1d62cf66743edfc0a54ab91bf8e5d916a99212ffc5e0)
 set(QUAY_BOTAN_MODULES
-  x25519 ed25519 x448 ed448 salsa20 poly1305 sodium aes gcm sha2_32 sha2_64 sha3 keccak hkdf hmac system_rng)
+  x25519 ed25519 x448 ed448 salsa20 poly1305 sodium aes gcm sha2_32 sha2_64 sha3 keccak hkdf hmac system_rng x509)
 set(botan_root "${CMAKE_BINARY_DIR}/_botan")
 set(botan_source "${botan_root}/botan-${QUAY_BOTAN_VERSION}")
 set(botan_made "${botan_root}/made")
@@ -92,7 +92,7 @@ set_target_properties(quay_sntrup761 PROPERTIES POSITION_INDEPENDENT_CODE ON CXX
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/connection.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/connection.cc src/tls_pin.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice quay_botan PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
