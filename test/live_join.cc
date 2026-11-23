@@ -189,14 +189,15 @@ int main(int, char** argv) {
     step(std::format("the CLI's confirmation opened through our ratchet: {}", ci ? shown(ci->info, 200) : std::string("(another message)")));
     await(command(smp::command::acknowledge{msg.id}, ids.recipient_id, &our_auth.priv));
 
-    // A chat message to the CLI.
+    // A chat message to the CLI: our second message -- the connection info was
+    // the first, and its hash is what this one says came before it.
     bytes msg_id(12);
     rng(std::span<byte>(msg_id));
     std::string id_text;
     put_base64url(id_text, msg_id);
     const std::string chat = R"({"v":"1-22","msgId":")" + id_text + R"(","event":"x.msg.new","params":{"content":{"type":"text","text":"hello from quay"}}})";
     bytes agent_msg;
-    agent::put_agent_message(agent_msg, agent::agent_message::message{{1, bytes{}}, agent::a_message::msg{text(chat)}});
+    agent::put_agent_message(agent_msg, agent::agent_message::message{{2, agent::message_hash(conn_info)}, agent::a_message::msg{text(chat)}});
     const auto enc_msg = ratchet::encrypt(rc, agent_msg, agent::agent_message_length(pq), rng);
     bytes msg_envelope;
     agent::put_envelope(msg_envelope, agent::envelope::message{agent_version, *enc_msg});
