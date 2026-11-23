@@ -92,7 +92,7 @@ set_target_properties(quay_sntrup761 PROPERTIES POSITION_INDEPENDENT_CODE ON CXX
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice quay_botan PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
@@ -124,7 +124,7 @@ if(QUAY_TESTS)
   else()
     set(quay_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS bytes crypto sntrup761_kat)
+  foreach(name IN ITEMS bytes crypto sntrup761_kat smp)
     add_executable(quay-${name}-test test/${name}_test.cc)
     target_include_directories(quay-${name}-test PRIVATE test)
     target_link_libraries(quay-${name}-test PRIVATE quay ${quay_gtest})
