@@ -16,12 +16,36 @@ import splice;
 import quay.bytes;
 import quay.crypto;
 import quay.smp;
+import quay.session;
 
 using namespace quay;
 using namespace quay::smp;
 
 namespace {
 int fd = -1;
+
+// What the TLS relay says first (tools/tls_relay.py): the peer chain, the Finished.
+session::tls_facts read_tls_facts() {
+  const auto exact = [](std::size_t n) {
+    bytes out(n);
+    std::size_t got = 0;
+    while (got < n) {
+      const auto r = ::recv(fd, out.data() + got, n - got, 0);
+      if (r <= 0) throw std::runtime_error("the relay closed the connection");
+      got += static_cast<std::size_t>(r);
+    }
+    return out;
+  };
+  const auto u16 = [&] {
+    const auto b = exact(2);
+    return (std::size_t{b[0]} << 8) | b[1];
+  };
+  session::tls_facts facts;
+  const auto count = exact(1)[0];
+  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exact(u16()));
+  facts.finished = exact(u16());
+  return facts;
+}
 std::uint16_t agreed = 0;  // the version both speak
 void send_all(std::span<const byte> data) {
   while (!data.empty()) {
@@ -88,7 +112,7 @@ std::pair<transmission, Want> await(const std::optional<corr_id>& correlation = 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);  // each line as it is said, though killed after
   try {
-    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15223";
+    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15225";
     const auto identity = base64url_decode(std::getenv("QUAY_SMP_FINGERPRINT") ? std::getenv("QUAY_SMP_FINGERPRINT") : "");
     check(identity && identity->size() == 32, "the router's fingerprint");
     const auto colon = address.rfind(':');
@@ -103,6 +127,7 @@ int main() {
     // The one place a C API asks for its own pointer type: sockaddr*.
     check(::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) == 0, "connected");
 
+    const auto facts = read_tls_facts();
     const auto hello = router_hello_of(read_block());
     check(hello.has_value(), "the router's hello");
     std::println("  versions {}-{}, session id {} bytes, {} certificates", hello->versions.min, hello->versions.max, hello->session_id.size(),
@@ -111,9 +136,8 @@ int main() {
     check(version.has_value(), "a version both speak");
     // Its identity: the SHA-256 of its CA certificate's DER -- which of the
     // chain it is, said.
-    const auto ca = std::ranges::find_if(hello->certificates, [&](const bytes& der) { return std::ranges::equal(crypto::sha256(der), *identity); });
-    check(ca != hello->certificates.end(), "the router's identity is the SHA-256 of a certificate in its chain");
-    std::println("  it is certificate {} of {}", ca - hello->certificates.begin(), hello->certificates.size());
+    const auto verified = session::verify(*hello, *identity, facts);
+    check(verified.has_value(), "the router authenticated: its TLS chain, pinned identity, signed session key and TLS session");
     agreed = *version;
     send_all(*client_hello(*version, *identity));
 
@@ -127,7 +151,7 @@ int main() {
     bytes body;
     put_command(body, made);
     const auto c1 = fresh();
-    const transmission create{signature_over(recipient_auth.priv, hello->session_id, c1, {}, body), c1, {}, body};
+    const transmission create{session::signature_over(*verified, recipient_auth.priv, c1, {}, body), c1, {}, body};
     send_all(*block_of(std::span(&create, 1), agreed));
     const auto [ids_t, ids] = await<response::queue_ids>(c1);
     check(!ids.recipient_id.empty() && !ids.sender_id.empty(), "a queue made (IDS)");
@@ -161,7 +185,7 @@ int main() {
     bytes ack_body;
     put_command(ack_body, command::acknowledge{msg.id});
     const auto c3 = fresh();
-    const transmission ack{signature_over(recipient_auth.priv, hello->session_id, c3, ids.recipient_id, ack_body), c3, ids.recipient_id, ack_body};
+    const transmission ack{session::signature_over(*verified, recipient_auth.priv, c3, ids.recipient_id, ack_body), c3, ids.recipient_id, ack_body};
     send_all(*block_of(std::span(&ack, 1), agreed));
     await<response::ok>(c3);
     check(true, "acknowledged (ACK)");
@@ -169,7 +193,7 @@ int main() {
     bytes del_body;
     put_command(del_body, command::remove{});
     const auto c4 = fresh();
-    const transmission del{signature_over(recipient_auth.priv, hello->session_id, c4, ids.recipient_id, del_body), c4, ids.recipient_id, del_body};
+    const transmission del{session::signature_over(*verified, recipient_auth.priv, c4, ids.recipient_id, del_body), c4, ids.recipient_id, del_body};
     send_all(*block_of(std::span(&del, 1), agreed));
     await<response::ok>(c4);
     check(true, "the queue deleted (DEL)");

@@ -92,7 +92,7 @@ set_target_properties(quay_sntrup761 PROPERTIES POSITION_INDEPENDENT_CODE ON CXX
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/connection.cc src/tls_pin.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice quay_botan PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
@@ -134,8 +134,10 @@ if(QUAY_TESTS)
   # it: tools/tls_proxy.py): QUAY_SMP_ADDRESS, QUAY_SMP_FINGERPRINT.
   option(QUAY_LIVE_TESTS "Test against a running smp-server" OFF)
   if(QUAY_LIVE_TESTS)
-    add_executable(quay-live-smp test/live_smp.cc)
-    target_link_libraries(quay-live-smp PRIVATE quay)
-    add_test(NAME live_smp COMMAND quay-live-smp)
+    foreach(live IN ITEMS live_smp live_pin)
+      add_executable(quay- test/.cc)
+      target_link_libraries(quay- PRIVATE quay)
+      add_test(NAME  COMMAND quay-)
+    endforeach()
   endif()
 endif()

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// quay.tls_pin -- a router authenticated, as simplexmq's client does it
+// quay.session -- a router authenticated, as simplexmq's client does it
 // (Transport.hs smpClientHandshake, Transport/Shared.hs chainIdCaCerts),
 // and more: what the TLS connection says -- the peer's certificate chain,
 // and the session's channel binding (the client's Finished message, the
@@ -13,11 +13,11 @@
 //   - the hello's session key (X25519) is signed by the TLS leaf's key;
 //   - the hello's session id is the TLS channel binding.
 //
-// Only a hello verified so is a verified_hello: what authenticators are
-// keyed by, and sessions signed with, comes from it.
+// Only a hello verified so is a session (verified): commands are signed
+// and authenticated with one alone -- a hello not verified cannot be used.
 module;
 #include "botan_all.h"
-export module quay.tls_pin;
+export module quay.session;
 
 import std;
 import splice;
@@ -25,7 +25,7 @@ import quay.bytes;
 import quay.crypto;
 import quay.smp;
 
-export namespace quay::tls_pin {
+export namespace quay::session {
 
 // What the TLS layer gives: the peer's chain, the leaf first, each DER; and
 // the client's Finished message (its verify data).
@@ -49,14 +49,28 @@ struct chain_mismatch {};  // the hello's chain is not the TLS chain
 struct no_session_key {};
 struct session_key_signature {};
 struct session {};         // the hello's session id is not this TLS session's
+struct version {};         // no SMP version both speak
 }  // namespace errors
 using pin_error = spl::variant<errors::chain_shape, errors::bad_certificate, errors::chain_signature, errors::identity,
-                               errors::chain_mismatch, errors::no_session_key, errors::session_key_signature, errors::session>;
+                               errors::chain_mismatch, errors::no_session_key, errors::session_key_signature, errors::session, errors::version>;
 
-// A router's hello, authenticated.
-struct verified_hello {
-  smp::router_hello hello;
-  public_key<curve::x25519> session_key;  // what deniable authenticators are keyed by
+// A router's session, authenticated: made by verify() alone.
+class verified;
+std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls);
+class verified {
+ public:
+  [[nodiscard]] const smp::router_hello& hello() const { return hello_; }
+  [[nodiscard]] std::span<const byte> id() const { return hello_.session_id; }
+  [[nodiscard]] const public_key<curve::x25519>& router_key() const { return router_key_; }  // what deniable authenticators are keyed by
+  [[nodiscard]] std::uint16_t version() const { return version_; }  // the SMP version both speak
+
+ private:
+  verified(smp::router_hello hello, public_key<curve::x25519> key, std::uint16_t version)
+      : hello_(std::move(hello)), router_key_(key), version_(version) {}
+  friend std::expected<verified, pin_error> verify(const smp::router_hello&, std::span<const byte>, const tls_facts&);
+  smp::router_hello hello_;
+  public_key<curve::x25519> router_key_;
+  std::uint16_t version_ = 0;
 };
 
 namespace detail {
@@ -105,7 +119,7 @@ inline std::optional<signed_object> signed_object_of(std::span<const byte> der) 
 }
 }  // namespace detail
 
-inline std::expected<verified_hello, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls) {
+inline std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls) {
   const auto& chain = tls.peer_chain;
   if (chain.size() < 2 || chain.size() > 4) return std::unexpected(errors::chain_shape{chain.size()});
   std::vector<std::unique_ptr<Botan::X509_Certificate>> certificates;
@@ -145,7 +159,32 @@ inline std::expected<verified_hello, pin_error> verify(const smp::router_hello& 
   if (!session_key) return std::unexpected(errors::no_session_key{});
   // The session: this TLS connection's, not another's relayed.
   if (hello.session_id != tls.finished) return std::unexpected(errors::session{});
-  return verified_hello{hello, *session_key};
+  const auto agreed = smp::agreed_version(hello.versions);
+  if (!agreed) return std::unexpected(errors::version{});
+  return verified{hello, *session_key, *agreed};
 }
 
-}  // namespace quay::tls_pin
+// A recipient's command signed with its Ed25519 key, in a verified session
+// (its identifier signed, though not sent).
+inline bytes signature_over(const verified& session, const crypto::private_key<curve::ed25519>& key, const smp::corr_id& correlation,
+                            std::span<const byte> entity, std::span<const byte> body) {
+  bytes authorized;
+  smp::put_authorized(authorized, session.id(), correlation, entity, body);
+  const auto s = crypto::sign(key, authorized);
+  return bytes(s.raw.begin(), s.raw.end());
+}
+// A command authenticated deniably: a box over the SHA-512 of what is
+// authorized, keyed by the client's X25519 key and the verified router's
+// session key, its nonce the correlation id.
+inline std::expected<bytes, crypto::crypto_error> authenticator_over(const verified& session, const crypto::private_key<curve::x25519>& key,
+                                                                     const smp::corr_id& correlation, std::span<const byte> entity,
+                                                                     std::span<const byte> body) {
+  bytes authorized;
+  smp::put_authorized(authorized, session.id(), correlation, entity, body);
+  const auto box = crypto::box_key_of(session.router_key(), key);
+  if (!box) return std::unexpected(box.error());
+  const auto digest = crypto::sha512(authorized);
+  return crypto::secretbox(*box, correlation, digest);
+}
+
+}  // namespace quay::session

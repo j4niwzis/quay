@@ -15,7 +15,7 @@ import splice;
 import quay.bytes;
 import quay.crypto;
 import quay.smp;
-import quay.tls_pin;
+import quay.session;
 
 using namespace quay;
 
@@ -35,16 +35,17 @@ std::size_t u16() {
   const auto b = exactly(2);
   return (std::size_t{b[0]} << 8) | b[1];
 }
-std::string said(const std::expected<tls_pin::verified_hello, tls_pin::pin_error>& r) {
+std::string said(const std::expected<session::verified, session::pin_error>& r) {
   if (r) return "verified";
-  return spl::visit(spl::overloaded{[](const tls_pin::errors::chain_shape&) { return std::string("refused: chain shape"); },
-                                    [](const tls_pin::errors::bad_certificate&) { return std::string("refused: bad certificate"); },
-                                    [](const tls_pin::errors::chain_signature&) { return std::string("refused: chain signature"); },
-                                    [](const tls_pin::errors::identity&) { return std::string("refused: not the pinned identity"); },
-                                    [](const tls_pin::errors::chain_mismatch&) { return std::string("refused: hello chain is not the TLS chain"); },
-                                    [](const tls_pin::errors::no_session_key&) { return std::string("refused: no session key"); },
-                                    [](const tls_pin::errors::session_key_signature&) { return std::string("refused: session key not signed by the TLS leaf"); },
-                                    [](const tls_pin::errors::session&) { return std::string("refused: not this TLS session"); }},
+  return spl::visit(spl::overloaded{[](const session::errors::chain_shape&) { return std::string("refused: chain shape"); },
+                                    [](const session::errors::bad_certificate&) { return std::string("refused: bad certificate"); },
+                                    [](const session::errors::chain_signature&) { return std::string("refused: chain signature"); },
+                                    [](const session::errors::identity&) { return std::string("refused: not the pinned identity"); },
+                                    [](const session::errors::chain_mismatch&) { return std::string("refused: hello chain is not the TLS chain"); },
+                                    [](const session::errors::no_session_key&) { return std::string("refused: no session key"); },
+                                    [](const session::errors::session_key_signature&) { return std::string("refused: session key not signed by the TLS leaf"); },
+                                    [](const session::errors::session&) { return std::string("refused: not this TLS session"); },
+                                    [](const session::errors::version&) { return std::string("refused: no common version"); }},
                     r.error());
 }
 }  // namespace
@@ -64,7 +65,7 @@ int main() {
     std::println("live pin: FAILED: no relay or no fingerprint");
     return 1;
   }
-  tls_pin::tls_facts facts;
+  session::tls_facts facts;
   const auto count = exactly(1)[0];
   for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exactly(u16()));
   facts.finished = exactly(u16());
@@ -80,26 +81,26 @@ int main() {
     std::println("the signed key ({} bytes): {}", hello->signed_key.size(), h);
   }
   bool ok = true;
-  const auto check = [&](std::string_view what, const std::expected<tls_pin::verified_hello, tls_pin::pin_error>& r, bool want) {
+  const auto check = [&](std::string_view what, const std::expected<session::verified, session::pin_error>& r, bool want) {
     std::println("{}: {}", what, said(r));
     ok = ok && r.has_value() == want;
   };
-  check("the router as it is", tls_pin::verify(*hello, *identity, facts), true);
+  check("the router as it is", session::verify(*hello, *identity, facts), true);
   auto other_identity = *identity;
   other_identity[0] ^= 1;
-  check("another identity pinned", tls_pin::verify(*hello, other_identity, facts), false);
+  check("another identity pinned", session::verify(*hello, other_identity, facts), false);
   auto other_session = facts;
   other_session.finished[0] ^= 1;
-  check("another TLS session (a relayed hello)", tls_pin::verify(*hello, *identity, other_session), false);
+  check("another TLS session (a relayed hello)", session::verify(*hello, *identity, other_session), false);
   auto pasted = *hello;
   pasted.signed_key.back() ^= 1;
-  check("a session key not signed by the leaf", tls_pin::verify(pasted, *identity, facts), false);
+  check("a session key not signed by the leaf", session::verify(pasted, *identity, facts), false);
   auto short_chain = facts;
   short_chain.peer_chain.resize(1);
-  check("a chain of one", tls_pin::verify(*hello, *identity, short_chain), false);
+  check("a chain of one", session::verify(*hello, *identity, short_chain), false);
   auto swapped = facts;
   std::swap(swapped.peer_chain[0], swapped.peer_chain[1]);
-  check("the chain's order changed", tls_pin::verify(*hello, *identity, swapped), false);
+  check("the chain's order changed", session::verify(*hello, *identity, swapped), false);
   std::println("live pin: {}", ok ? "passed" : "FAILED");
   return ok ? 0 : 1;
 }

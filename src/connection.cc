@@ -20,6 +20,7 @@ import quay.crypto;
 import quay.smp;
 import quay.ratchet;
 import quay.agent;
+import quay.session;
 
 export namespace quay::connection {
 
@@ -42,13 +43,13 @@ struct action {
   smp::command_t command;
   authorization_t authorization;
 };
-// The transmission an action is, for a session (its identifier signed).
-inline smp::transmission transmission_of(const action& a, std::span<const byte> session_id, const smp::corr_id& correlation) {
+// The transmission an action is, in a verified session (its identifier signed).
+inline smp::transmission transmission_of(const action& a, const session::verified& in, const smp::corr_id& correlation) {
   bytes body;
   smp::put_command(body, a.command);
   bytes auth = spl::visit(spl::overloaded{[](const authorization::none&) { return bytes{}; },
                                           [&](const authorization::signed_by& s) {
-                                            return smp::signature_over(s.key, session_id, correlation, a.entity, body);
+                                            return session::signature_over(in, s.key, correlation, a.entity, body);
                                           }},
                           a.authorization);
   return smp::transmission{std::move(auth), correlation, a.entity, std::move(body)};

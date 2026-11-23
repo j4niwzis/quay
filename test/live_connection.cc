@@ -15,6 +15,7 @@ import splice;
 import quay.bytes;
 import quay.crypto;
 import quay.smp;
+import quay.session;
 import quay.ratchet;
 import quay.agent;
 import quay.connection;
@@ -23,8 +24,31 @@ using namespace quay;
 
 namespace {
 int fd = -1;
+
+// What the TLS relay says first (tools/tls_relay.py): the peer chain, the Finished.
+session::tls_facts read_tls_facts() {
+  const auto exact = [](std::size_t n) {
+    bytes out(n);
+    std::size_t got = 0;
+    while (got < n) {
+      const auto r = ::recv(fd, out.data() + got, n - got, 0);
+      if (r <= 0) throw std::runtime_error("the relay closed the connection");
+      got += static_cast<std::size_t>(r);
+    }
+    return out;
+  };
+  const auto u16 = [&] {
+    const auto b = exact(2);
+    return (std::size_t{b[0]} << 8) | b[1];
+  };
+  session::tls_facts facts;
+  const auto count = exact(1)[0];
+  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exact(u16()));
+  facts.finished = exact(u16());
+  return facts;
+}
 std::uint16_t agreed = 0;
-bytes session;
+std::optional<session::verified> verified;
 crypto::system_random rng;
 std::map<smp::corr_id, std::uint64_t> pending;
 void send_all(std::span<const byte> data) {
@@ -54,7 +78,7 @@ void perform(const connection::output& out, bool& is_connected) {
     smp::corr_id c{};
     rng(std::span<byte>(c));
     pending[c] = a.id;
-    const auto t = connection::transmission_of(a, session, c);
+    const auto t = connection::transmission_of(a, *verified, c);
     send_all(*smp::block_of(std::span(&t, 1), agreed));
     std::println("  -> action {}", a.id);
   }
@@ -83,17 +107,20 @@ int main(int, char** argv) {
     const auto& inv = *link->template get_if<agent::link::invitation>();
     sockaddr_in where{};
     where.sin_family = AF_INET;
-    where.sin_port = htons(15224);
+    where.sin_port = htons(15225);
     inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     timeval wait{20, 0};
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
     // The one place a C API asks for its own pointer type: sockaddr*.
     if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
+    const auto facts = read_tls_facts();
     const auto hello = smp::router_hello_of(read_block());
-    agreed = *smp::agreed_version(hello->versions);
-    session = hello->session_id;
     const auto router = inv.queues.front().address.router;
+    auto checked = session::verify(*hello, router.identity, facts);
+    if (!checked) throw std::runtime_error("the router is not the one pinned (or not this TLS session's)");
+    verified = std::move(*checked);
+    agreed = verified->version();
     send_all(*smp::client_hello(agreed, router.identity));
 
     const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay state machine","fullName":""}}})";

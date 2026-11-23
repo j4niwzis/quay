@@ -882,28 +882,8 @@ struct router_hello {
 
 // ---- authorization ------------------------------------------------------------------
 
-// A recipient's command signed with its Ed25519 key.
-inline bytes signature_over(const crypto::private_key<curve::ed25519>& key, std::span<const byte> session_id, const corr_id& correlation,
-                            std::span<const byte> entity, std::span<const byte> body) {
-  bytes authorized;
-  put_authorized(authorized, session_id, correlation, entity, body);
-  const auto s = crypto::sign(key, authorized);
-  return bytes(s.raw.begin(), s.raw.end());
-}
-// A command authenticated deniably: a box over the SHA-512 of what is
-// authorized, keyed by the client's X25519 key and the router's session
-// key, its nonce the correlation id.
-inline std::expected<bytes, crypto::crypto_error> authenticator_over(const crypto::private_key<curve::x25519>& key,
-                                                                     const public_key<curve::x25519>& router_session_key,
-                                                                     std::span<const byte> session_id, const corr_id& correlation,
-                                                                     std::span<const byte> entity, std::span<const byte> body) {
-  bytes authorized;
-  put_authorized(authorized, session_id, correlation, entity, body);
-  const auto box = crypto::box_key_of(router_session_key, key);
-  if (!box) return std::unexpected(box.error());
-  const auto digest = crypto::sha512(authorized);
-  return crypto::secretbox(*box, correlation, digest);
-}
+// Commands are signed and authenticated in a verified session alone:
+// quay.session's signature_over and authenticator_over.
 
 // ---- the layers a message goes through ------------------------------------------------
 

@@ -210,9 +210,10 @@ TEST(Smp, SignedCommand) {
   c[0] = 1;
   const bytes session(32, 4), entity{5, 6};
   const bytes body = of("SUB");
-  const bytes sig = signature_over(key.priv, session, c, entity, body);
   bytes authorized;
   put_authorized(authorized, session, c, entity, body);
+  const auto signed_ = crypto::sign(key.priv, authorized);
+  const bytes sig(signed_.raw.begin(), signed_.raw.end());
   crypto::signature<curve::ed25519> s;
   std::ranges::copy(sig, s.raw.begin());
   EXPECT_TRUE(crypto::verify(key.pub, authorized, s));
