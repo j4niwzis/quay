@@ -9,6 +9,8 @@ import gtest;
 import quay.bytes;
 import quay.crypto;
 import quay.ratchet;
+import quay.smp;
+import quay.agent;
 
 #include "gtest/gtest-macros.h"
 
@@ -53,6 +55,11 @@ pair_of_ratchets connect(bool pq, counting& random) {
   return {std::move(alice), std::move(bob)};
 }
 constexpr std::size_t padded = 15840;
+#include "simplex_vectors.inc"
+template <class T>
+void copy_into(T& out, const bytes& from) {
+  std::ranges::copy(from, out.begin());
+}
 }  // namespace
 
 TEST(Ratchet, WithoutKem) {
@@ -111,4 +118,39 @@ TEST(Ratchet, TooLargeRefused) {
   counting random;
   auto [alice, bob] = connect(false, random);
   EXPECT_TRUE(!encrypt(alice, bytes(padded), padded, random).has_value());
+}
+
+// What simplexmq's ratchet sent, replayed: a session recorded with
+// simplex-chat 7.1.4 (test/simplex_vectors.inc) -- its invitation, our
+// ratchet's private keys, the connection info the CLI encrypted to us. Our
+// ratchet, made again from them, opens it to what it was.
+TEST(Ratchet, SimplexChatSessionReplayed) {
+  counting random;
+  const auto link = agent::link_of(std::string(simplex_invitation.begin(), simplex_invitation.end()));
+  ASSERT_TRUE(link.has_value());
+  const auto& inv = *link->template get_if<agent::link::invitation>();
+  const std::uint16_t version = std::min(inv.e2e.versions.max, current_version);
+  e2e_private mine;
+  copy_into(mine.key1.raw, simplex_our_key1);
+  copy_into(mine.key2.raw, simplex_our_key2);
+  kem_pair kem;
+  copy_into(kem.pub.raw, simplex_our_kem_public);
+  copy_into(kem.secret.raw, simplex_our_kem_secret);
+  mine.kem = kem;
+  crypto::sntrup761::ciphertext cipher{};
+  crypto::sntrup761::shared_secret shared{};
+  copy_into(cipher, simplex_our_kem_cipher);
+  copy_into(shared, simplex_our_kem_shared);
+  mine.accepted = std::pair{cipher, shared};
+  e2e_params theirs{version, inv.e2e.key1, inv.e2e.key2, std::nullopt};
+  if (inv.e2e.kem_key) theirs.kem = kem_params::proposed{*inv.e2e.kem_key};
+  const auto agreed = x3dh_sending(mine, theirs);
+  ASSERT_TRUE(agreed.has_value());
+  x448_private own_dh;
+  copy_into(own_dh.raw, simplex_our_dh);
+  state rc = sending_ratchet(version, current_version, inv.e2e.key2, own_dh, agreed->first, agreed->second);
+  const auto opened = decrypt(rc, simplex_their_conn_info, random);
+  ASSERT_TRUE(opened.has_value());
+  EXPECT_TRUE(*opened == simplex_their_conn_info_plain);
+  EXPECT_TRUE(rc.receive_kem);  // its step was augmented with the KEM
 }

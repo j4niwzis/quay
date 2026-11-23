@@ -23,6 +23,14 @@ import quay.agent;
 using namespace quay;
 
 namespace {
+// What a session was, written as C++ arrays (QUAY_RECORD=file): replayed by
+// test/ratchet_test.cc against what simplexmq's ratchet sent.
+std::string recorded;
+void record(std::string_view name, std::span<const byte> data) {
+  recorded += std::format("inline const quay::bytes {}{{", name);
+  for (std::size_t i = 0; i < data.size(); ++i) recorded += std::format("{}{}", i ? "," : "", data[i]);
+  recorded += "};\n";
+}
 int fd = -1;
 std::uint16_t agreed = 0;
 bytes session;
@@ -142,6 +150,18 @@ int main(int, char** argv) {
     ratchet::state rc = ratchet::sending_ratchet(e2e_version, ratchet::current_version, inv.e2e.key2, own_dh.priv, agreed_ratchet->first,
                                                  agreed_ratchet->second);
     const bool pq = rc.support_kem;
+    record("simplex_invitation", text(invitation_text));
+    record("simplex_our_key1", our_private.key1.raw);
+    record("simplex_our_key2", our_private.key2.raw);
+    if (our_private.kem) {
+      record("simplex_our_kem_public", our_private.kem->pub.raw);
+      record("simplex_our_kem_secret", our_private.kem->secret.raw);
+    }
+    if (our_private.accepted) {
+      record("simplex_our_kem_cipher", our_private.accepted->first);
+      record("simplex_our_kem_shared", our_private.accepted->second);
+    }
+    record("simplex_our_dh", own_dh.priv.raw);
     step(std::format("our ratchet made (e2e v{}, PQ {})", e2e_version, pq ? "on" : "off"));
 
     // The confirmation: our reply queue and a chat profile, through the ratchet.
@@ -181,7 +201,9 @@ int main(int, char** argv) {
     if (!their_envelope) throw std::runtime_error("its envelope does not read");
     const auto* c_env = their_envelope->template get_if<agent::envelope::confirmation>();
     if (!c_env) throw std::runtime_error("not a confirmation envelope");
+    record("simplex_their_conn_info", c_env->encrypted);
     const auto their_info = ratchet::decrypt(rc, c_env->encrypted, rng);
+    if (their_info) record("simplex_their_conn_info_plain", *their_info);
     if (!their_info) throw std::runtime_error("the CLI's connection info did not decrypt through our ratchet");
     const auto info_message = agent::agent_message_of(*their_info);
     if (!info_message) throw std::runtime_error("its agent message does not read");
@@ -219,7 +241,9 @@ int main(int, char** argv) {
         const auto env = em ? agent::envelope_of(em->body) : std::expected<agent::envelope_t, decode_error>(std::unexpected(decode_error(quay::errors::short_input{})));
         const auto* menv = env ? env->template get_if<agent::envelope::message>() : nullptr;
         if (!menv) throw std::runtime_error("not a message envelope");
+        if (i == 0) record("simplex_their_message", menv->encrypted);
         const auto plain = ratchet::decrypt(rc, menv->encrypted, rng);
+        if (plain && i == 0) record("simplex_their_message_plain", *plain);
         if (!plain) throw std::runtime_error("a later message did not decrypt");
         const auto am = agent::agent_message_of(*plain);
         const auto* mm = am ? am->template get_if<agent::agent_message::message>() : nullptr;
@@ -230,6 +254,7 @@ int main(int, char** argv) {
         break;
       }
     }
+    if (const char* out = std::getenv("QUAY_RECORD")) std::ofstream(out) << "// Recorded by test/live_join.cc: a session with simplex-chat 7.1.4 (smp-server 6.5.0).\n" << recorded;
     std::println("live join: passed");
     return 0;
   } catch (const std::exception& failed) {
