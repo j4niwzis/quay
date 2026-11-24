@@ -188,6 +188,15 @@ inline std::expected<box_key, crypto_error> box_key_of(const public_key<curve::x
   if (Botan::Sodium::crypto_box_beforenm(out.data(), theirs.raw.data(), mine.raw.data()) != 0) return std::unexpected(errors::bad_key{});
   return out;
 }
+// A key simplexmq seals with by its own secretbox (files): its XSalsa20 is
+// keyed, as a box's is, through HSalsa20 of the key and a zero input -- so
+// a box's afternm under this key is what it makes.
+inline box_key secretbox_key_of(const box_key& key) {
+  static constexpr std::array<byte, 16> zero{}, sigma{'e', 'x', 'p', 'a', 'n', 'd', ' ', '3', '2', '-', 'b', 'y', 't', 'e', ' ', 'k'};
+  box_key out{};
+  Botan::Sodium::crypto_core_hsalsa20(out.data(), zero.data(), key.data(), sigma.data());
+  return out;
+}
 // Sealed: the tag (16 bytes), then the ciphertext -- NaCl's "easy" form,
 // as SimpleX sends it.
 inline bytes secretbox(const box_key& key, const box_nonce& nonce, std::span<const byte> message) {

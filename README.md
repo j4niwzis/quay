@@ -21,6 +21,7 @@ comes is fed to it, and the caller's transport and control flow carry it.
 | `quay.client` | one session with one router for any number of connections: socket bytes in and out, answers and deliveries routed back |
 | `quay.hpack`, `quay.http2` | HTTP/2 for XFTP, sans-IO: HPACK with its tables read at compile time from RFC 7541's text, frames, streams, flow control |
 | `quay.xftp` | XFTP: a session with a files router (the handshake, the router authenticated), FNEW/FADD/FPUT/FGET/FACK/FDEL, chunks opened |
+| `quay.xfile` | files over XFTP: a file sealed whole and cut into chunks, as simplexmq's xftp does, and file descriptions read and written |
 | `quay.compression` | simplex-chat's compressed batches (zstd) |
 | `quay.chat` | simplex-chat's messages read into types through knot (`x.info`, `x.msg.new`, ...), and written |
 
@@ -29,8 +30,7 @@ quay invites the CLI and joins its invitations, connects through its address
 and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, save/restore, re-subscription and queue switching both ways -- over quay's own TLS.
 
-Not yet: the file layer over XFTP (file encryption, descriptions, chat's
-x.file), groups, private message routing.
+Not yet: chat's file messages (x.file), groups, private message routing.
 
 ## Keeping a connection: save before you send
 

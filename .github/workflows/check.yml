@@ -118,6 +118,10 @@ jobs:
           sudo nohup /tmp/xftp-server start > /tmp/xftp-server.log 2>&1 &
           for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/15443) 2>/dev/null && break; sleep 0.2; done
           echo "QUAY_XFTP_FINGERPRINT=$(sudo cat /etc/opt/simplex-xftp/fingerprint)" >> "$GITHUB_ENV"
+          # simplexmq's own xftp client, for live_xfile.
+          curl -sSL -o /tmp/xftp "https://github.com/simplex-chat/simplexmq/releases/download/${version}/xftp-ubuntu-24_04-x86-64"
+          chmod +x /tmp/xftp
+          echo "QUAY_XFTP_CLI=/tmp/xftp" >> "$GITHUB_ENV"
           # simplex-chat's CLI on that router, its WebSocket API on 5225, for
           # the tests that join its invitations and invite it.
           curl -sSL -o /tmp/simplex-chat "https://github.com/simplex-chat/simplex-chat/releases/download/v7.1.4/simplex-chat-ubuntu-24_04-x86_64"
