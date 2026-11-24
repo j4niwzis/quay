@@ -35,7 +35,7 @@ bob "#$group hello all, from bob" --wait 5 > /dev/null || true
 wait $test_pid && status=0 || status=$?
 echo "--- the test said:"; cat "$dir/test.log"
 sleep 3
-one "/tail #$group 10" | python3 -c '
+one "/tail #$group 12" | python3 -c '
 import json, sys
 for line in sys.stdin:
     for it in json.loads(line).get("resp", {}).get("chatItems", []):
@@ -45,6 +45,7 @@ for line in sys.stdin:
 grep -q "hello all, from bob" "$dir/tail.txt" || { echo "the first CLI did not hear bob"; exit 1; }
 grep -q "hello all, from bob (moderated)" "$dir/tail.txt" || { echo "bob's message was not moderated"; exit 1; }
 grep -qi "removed" "$dir/tail.txt" || { echo "the first CLI did not see bob removed"; exit 1; }
+grep -qi "blocked" "$dir/tail.txt" || { echo "the first CLI did not see bob blocked"; exit 1; }
 bob "/tail #$group 4" | python3 -c '
 import json, sys
 for line in sys.stdin:

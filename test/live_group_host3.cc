@@ -194,11 +194,12 @@ int main(int argc, char** argv) {
     // member id), then the member removed (x.grp.mem.del), told to everyone.
     if (bob_message) {
       for (std::size_t i = 0; i < members.size(); ++i) {
+        send_to_member(i, chat::event::group_member_restrict{members[1].id, {"blocked"}});
         send_to_member(i, chat::event::message_delete{*bob_message, members[1].id});
         send_to_member(i, chat::event::group_member_delete{members[1].id, std::nullopt});
       }
       for (auto todo = std::exchange(later, {}); auto& [tag, out] : todo) session.submit(tag, out, rng);
-      std::println("the second member's message moderated (x.msg.del), the member removed (x.grp.mem.del)");
+      std::println("the second member blocked for all (x.grp.mem.restrict), its message moderated (x.msg.del), the member removed (x.grp.mem.del)");
       // Long enough for the router to take them.
       for (int round = 0; round < 6; ++round) {
         for (auto out = session.take_outgoing(); !out.empty();) {
