@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // quay joins a one-time invitation simplex-chat's CLI made (the fast flow:
-// SKEY), over a router reached through a TLS relay (QUAY_SMP_ADDRESS): its
+// SKEY), over a router reached by quay.tls (127.0.0.1:15223): its
 // reply queue made, the invitation's queue secured, a confirmation sent (its
 // ratchet parameters, and connection info -- a chat profile -- through the
 // ratchet), the CLI's confirmation received and opened, a chat message sent,
@@ -18,6 +18,7 @@ import quay.bytes;
 import quay.crypto;
 import quay.smp;
 import quay.session;
+import quay.tls;
 import quay.ratchet;
 import quay.agent;
 
@@ -34,48 +35,10 @@ void record(std::string_view name, std::span<const byte> data) {
 }
 int fd = -1;
 
-// What the TLS relay says first (tools/tls_relay.py): the peer chain, the Finished.
-session::tls_facts read_tls_facts() {
-  const auto exact = [](std::size_t n) {
-    bytes out(n);
-    std::size_t got = 0;
-    while (got < n) {
-      const auto r = ::recv(fd, out.data() + got, n - got, 0);
-      if (r <= 0) throw std::runtime_error("the relay closed the connection");
-      got += static_cast<std::size_t>(r);
-    }
-    return out;
-  };
-  const auto u16 = [&] {
-    const auto b = exact(2);
-    return (std::size_t{b[0]} << 8) | b[1];
-  };
-  session::tls_facts facts;
-  const auto count = exact(1)[0];
-  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exact(u16()));
-  facts.finished = exact(u16());
-  return facts;
-}
+#include "live_io.h"
 std::uint16_t agreed = 0;
 std::optional<session::verified> verified;
 crypto::system_random rng;
-void send_all(std::span<const byte> data) {
-  while (!data.empty()) {
-    const auto n = ::send(fd, data.data(), data.size(), 0);
-    if (n <= 0) throw std::runtime_error("send failed");
-    data = data.subspan(static_cast<std::size_t>(n));
-  }
-}
-bytes read_block() {
-  bytes out(smp::block_size);
-  std::size_t got = 0;
-  while (got < out.size()) {
-    const auto n = ::recv(fd, out.data() + got, out.size() - got, 0);
-    if (n <= 0) throw std::runtime_error(n == 0 ? "the router closed the connection" : "the router said nothing for 20 seconds");
-    got += static_cast<std::size_t>(n);
-  }
-  return out;
-}
 void step(std::string_view what) { std::println("ok: {}", what); }
 smp::corr_id fresh() {
   smp::corr_id c{};
@@ -127,7 +90,7 @@ int main(int, char** argv) {
     const auto& their_queue = inv.queues.front();
     step("the CLI's invitation read");
 
-    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15225";
+    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15223";
     const auto colon = address.rfind(':');
     sockaddr_in where{};
     where.sin_family = AF_INET;

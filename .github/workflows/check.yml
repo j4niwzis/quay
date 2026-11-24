@@ -96,7 +96,7 @@ jobs:
           cmake --build build
 
       # A real router for the live test: smp-server, its release, on
-      # 127.0.0.1:15223; and a TLS 1.3 relay in front of it on 15225, through
+      # 127.0.0.1:15223; the tests reach it by quay.tls, through
       # OpenSSL, that gives the test the peer chain and the channel binding.
       - name: smp-server
         run: |
@@ -107,11 +107,8 @@ jobs:
           sudo sed -i 's/^port = .*/port = 15223/; s/^host = .*/host = 127.0.0.1/' /etc/opt/simplex/smp-server.ini
           sudo nohup /tmp/smp-server start > /tmp/smp-server.log 2>&1 &
           for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/15223) 2>/dev/null && break; sleep 0.2; done
-          nohup python3 tools/tls_relay.py 15225 127.0.0.1 15223 > /tmp/tls-relay.log 2>&1 &
-          for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/15225) 2>/dev/null && break; sleep 0.2; done
           echo "QUAY_SMP_FINGERPRINT=$(sudo cat /etc/opt/simplex/fingerprint)" >> "$GITHUB_ENV"
-          echo "QUAY_SMP_ADDRESS=127.0.0.1:15225" >> "$GITHUB_ENV"
-          echo "QUAY_SMP_TLS=127.0.0.1:15223" >> "$GITHUB_ENV"
+          echo "QUAY_SMP_ADDRESS=127.0.0.1:15223" >> "$GITHUB_ENV"
           # simplex-chat's CLI on that router, its WebSocket API on 5225, for
           # the tests that join its invitations and invite it.
           curl -sSL -o /tmp/simplex-chat "https://github.com/simplex-chat/simplex-chat/releases/download/v7.1.4/simplex-chat-ubuntu-24_04-x86_64"

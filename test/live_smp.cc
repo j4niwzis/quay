@@ -3,7 +3,7 @@
 // (NEW), a message sent to it as its sender (SEND, a confirmation), received
 // as its recipient (MSG, both layers taken off), acknowledged (ACK), and the
 // queue deleted (DEL). Over plain TCP to QUAY_SMP_ADDRESS (host:port) -- a
-// TLS relay in front of the router -- whose identity is QUAY_SMP_FINGERPRINT.
+// TLS by quay.tls to the router -- whose identity is QUAY_SMP_FINGERPRINT.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -17,6 +17,7 @@ import quay.bytes;
 import quay.crypto;
 import quay.smp;
 import quay.session;
+import quay.tls;
 
 using namespace quay;
 using namespace quay::smp;
@@ -24,46 +25,8 @@ using namespace quay::smp;
 namespace {
 int fd = -1;
 
-// What the TLS relay says first (tools/tls_relay.py): the peer chain, the Finished.
-session::tls_facts read_tls_facts() {
-  const auto exact = [](std::size_t n) {
-    bytes out(n);
-    std::size_t got = 0;
-    while (got < n) {
-      const auto r = ::recv(fd, out.data() + got, n - got, 0);
-      if (r <= 0) throw std::runtime_error("the relay closed the connection");
-      got += static_cast<std::size_t>(r);
-    }
-    return out;
-  };
-  const auto u16 = [&] {
-    const auto b = exact(2);
-    return (std::size_t{b[0]} << 8) | b[1];
-  };
-  session::tls_facts facts;
-  const auto count = exact(1)[0];
-  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exact(u16()));
-  facts.finished = exact(u16());
-  return facts;
-}
+#include "live_io.h"
 std::uint16_t agreed = 0;  // the version both speak
-void send_all(std::span<const byte> data) {
-  while (!data.empty()) {
-    const auto n = ::send(fd, data.data(), data.size(), 0);
-    if (n <= 0) throw std::runtime_error("send failed");
-    data = data.subspan(static_cast<std::size_t>(n));
-  }
-}
-bytes read_block() {
-  bytes out(block_size);
-  std::size_t got = 0;
-  while (got < out.size()) {
-    const auto n = ::recv(fd, out.data() + got, out.size() - got, 0);
-    if (n <= 0) throw std::runtime_error(n == 0 ? "the router closed the connection" : "the router said nothing for ten seconds");
-    got += static_cast<std::size_t>(n);
-  }
-  return out;
-}
 void check(bool ok, std::string_view what) {
   if (!ok) throw std::runtime_error(std::string(what));
   std::println("ok: {}", what);
@@ -112,7 +75,7 @@ std::pair<transmission, Want> await(const std::optional<corr_id>& correlation = 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);  // each line as it is said, though killed after
   try {
-    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15225";
+    const std::string address = std::getenv("QUAY_SMP_ADDRESS") ? std::getenv("QUAY_SMP_ADDRESS") : "127.0.0.1:15223";
     const auto identity = base64url_decode(std::getenv("QUAY_SMP_FINGERPRINT") ? std::getenv("QUAY_SMP_FINGERPRINT") : "");
     check(identity && identity->size() == 32, "the router's fingerprint");
     const auto colon = address.rfind(':');

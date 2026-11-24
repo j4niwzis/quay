@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// quay.tls_pin against a real router: through a TLS relay that tells what
-// the TLS connection says (tools/tls_relay.py) -- the peer chain and the
+// quay.session's pinning against a real router: what the TLS connection
+// says, by quay.tls -- the peer chain and the
 // channel binding -- the router's hello verified against them and its
 // pinned identity; and the same hello refused where any of them is wrong.
 #include <arpa/inet.h>
@@ -16,25 +16,13 @@ import quay.bytes;
 import quay.crypto;
 import quay.smp;
 import quay.session;
+import quay.tls;
 
 using namespace quay;
 
 namespace {
 int fd = -1;
-bytes exactly(std::size_t n) {
-  bytes out(n);
-  std::size_t got = 0;
-  while (got < n) {
-    const auto r = ::recv(fd, out.data() + got, n - got, 0);
-    if (r <= 0) throw std::runtime_error("the relay closed the connection");
-    got += static_cast<std::size_t>(r);
-  }
-  return out;
-}
-std::size_t u16() {
-  const auto b = exactly(2);
-  return (std::size_t{b[0]} << 8) | b[1];
-}
+#include "live_io.h"
 std::string said(const std::expected<session::verified, session::pin_error>& r) {
   if (r) return "verified";
   return spl::visit(spl::overloaded{[](const session::errors::chain_shape&) { return std::string("refused: chain shape"); },
@@ -55,22 +43,19 @@ int main() {
   const auto identity = base64url_decode(std::getenv("QUAY_SMP_FINGERPRINT") ? std::getenv("QUAY_SMP_FINGERPRINT") : "");
   sockaddr_in where{};
   where.sin_family = AF_INET;
-  where.sin_port = htons(15225);
+  where.sin_port = htons(15223);
   inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
   fd = ::socket(AF_INET, SOCK_STREAM, 0);
   timeval wait{20, 0};
   ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
   // The one place a C API asks for its own pointer type: sockaddr*.
   if (!identity || ::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) {
-    std::println("live pin: FAILED: no relay or no fingerprint");
+    std::println("live pin: FAILED: no router or no fingerprint");
     return 1;
   }
-  session::tls_facts facts;
-  const auto count = exactly(1)[0];
-  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exactly(u16()));
-  facts.finished = exactly(u16());
+  const auto facts = read_tls_facts();
   std::println("the TLS side: {} certificates, Finished {} bytes", facts.peer_chain.size(), facts.finished.size());
-  const auto hello = smp::router_hello_of(exactly(smp::block_size));
+  const auto hello = smp::router_hello_of(read_block());
   if (!hello) {
     std::println("live pin: FAILED: no hello");
     return 1;
@@ -91,7 +76,7 @@ int main() {
   check("another identity pinned", session::verify(*hello, other_identity, facts), false);
   auto other_session = facts;
   other_session.finished[0] ^= 1;
-  check("another TLS session (a relayed hello)", session::verify(*hello, *identity, other_session), false);
+  check("another TLS session (a hello relayed from it)", session::verify(*hello, *identity, other_session), false);
   auto pasted = *hello;
   pasted.signed_key.back() ^= 1;
   check("a session key not signed by the leaf", session::verify(pasted, *identity, facts), false);

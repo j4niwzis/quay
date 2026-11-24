@@ -5,7 +5,7 @@
 // address (tools/live_cli_contact.sh) -- sent to it as a contact request the
 // CLI accepts; its confirmation allowed, and a message sent once connected.
 // The router is the one the CLI's own invitation or address names.
-// Over plain TCP to a TLS relay in front of the router.
+// Over TLS by quay.tls, straight to the router.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -19,6 +19,7 @@ import quay.bytes;
 import quay.crypto;
 import quay.smp;
 import quay.session;
+import quay.tls;
 import quay.ratchet;
 import quay.agent;
 import quay.connection;
@@ -35,49 +36,11 @@ connection::flow flow_asked() {
 namespace {
 int fd = -1;
 
-// What the TLS relay says first (tools/tls_relay.py): the peer chain, the Finished.
-session::tls_facts read_tls_facts() {
-  const auto exact = [](std::size_t n) {
-    bytes out(n);
-    std::size_t got = 0;
-    while (got < n) {
-      const auto r = ::recv(fd, out.data() + got, n - got, 0);
-      if (r <= 0) throw std::runtime_error("the relay closed the connection");
-      got += static_cast<std::size_t>(r);
-    }
-    return out;
-  };
-  const auto u16 = [&] {
-    const auto b = exact(2);
-    return (std::size_t{b[0]} << 8) | b[1];
-  };
-  session::tls_facts facts;
-  const auto count = exact(1)[0];
-  for (byte i = 0; i < count; ++i) facts.peer_chain.push_back(exact(u16()));
-  facts.finished = exact(u16());
-  return facts;
-}
+#include "live_io.h"
 std::uint16_t agreed = 0;
 std::optional<session::verified> verified;
 crypto::system_random rng;
 std::map<smp::corr_id, std::uint64_t> pending;
-void send_all(std::span<const byte> data) {
-  while (!data.empty()) {
-    const auto n = ::send(fd, data.data(), data.size(), 0);
-    if (n <= 0) throw std::runtime_error("send failed");
-    data = data.subspan(static_cast<std::size_t>(n));
-  }
-}
-bytes read_block() {
-  bytes out(smp::block_size);
-  std::size_t got = 0;
-  while (got < out.size()) {
-    const auto n = ::recv(fd, out.data() + got, out.size() - got, 0);
-    if (n <= 0) throw std::runtime_error(n == 0 ? "closed" : "quiet for 20 seconds");
-    got += static_cast<std::size_t>(n);
-  }
-  return out;
-}
 std::string shown(std::span<const byte> b) {
   std::string out;
   for (const byte c : b.first(std::min<std::size_t>(200, b.size()))) out += (c >= 32 && c < 127) ? static_cast<char>(c) : '.';
@@ -138,11 +101,11 @@ int main(int, char** argv) {
     // The CLI's invitation (only its router used), or its contact address.
     const auto queues = spl::visit([](const auto& l) { return l.queues; }, *link);
     const auto router = queues.front().address.router;
-    // A session with the router: TCP to the relay, the router authenticated, hellos.
+    // A session with the router: TCP, TLS by quay.tls, the router authenticated, hellos.
     const auto open_session = [&] {
       sockaddr_in where{};
       where.sin_family = AF_INET;
-      where.sin_port = htons(15225);
+      where.sin_port = htons(15223);
       inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
       fd = ::socket(AF_INET, SOCK_STREAM, 0);
       timeval wait{20, 0};
