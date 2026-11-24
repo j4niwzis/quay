@@ -138,6 +138,22 @@ consteval auto json_schema(knot::type<group_profile>) {
       .member<"full_name">(knot::key("fullName"))
       .member<"group_preferences">(knot::key("groupPreferences"));
 }
+// What a group's host says joining a member who came by the group's link.
+struct group_link_invitation {
+  member_id_role from_member;
+  std::string from_member_name;
+  member_id_role invited_member;
+  chat::group_profile group_profile;
+  std::optional<std::int64_t> group_size;
+};
+consteval auto json_schema(knot::type<group_link_invitation>) {
+  return knot::schema<group_link_invitation>()
+      .member<"from_member">(knot::key("fromMember"))
+      .member<"from_member_name">(knot::key("fromMemberName"))
+      .member<"invited_member">(knot::key("invitedMember"))
+      .member<"group_profile">(knot::key("groupProfile"))
+      .member<"group_size">(knot::key("groupSize"));
+}
 // An invitation to a group: who invites, the member we are to be, the
 // invitation link our member connection joins, the group itself.
 struct group_invitation {
@@ -213,6 +229,20 @@ struct group_invite {  // x.grp.inv
 consteval auto json_schema(knot::type<group_invite>) {
   return knot::schema<group_invite>().member<"group_invitation">(knot::key("groupInvitation")).tag("x.grp.inv");
 }
+struct contact_request {  // x.contact: what a contact request to an address says
+  chat::profile profile;
+};
+consteval auto json_schema(knot::type<contact_request>) { return knot::schema<contact_request>().tag("x.contact"); }
+struct group_link_invite {  // x.grp.link.inv: the host's info, joining a member who came by the link
+  chat::group_link_invitation invitation;
+};
+consteval auto json_schema(knot::type<group_link_invite>) {
+  return knot::schema<group_link_invite>().member<"invitation">(knot::key("groupLinkInvitation")).tag("x.grp.link.inv");
+}
+struct group_link_member {  // x.grp.link.mem: such a member's profile, once connected
+  chat::profile profile;
+};
+consteval auto json_schema(knot::type<group_link_member>) { return knot::schema<group_link_member>().tag("x.grp.link.mem"); }
 struct group_accept {  // x.grp.acpt: the connection info a member joining says
   std::string member_id;
   std::optional<chat::profile> profile;
@@ -331,7 +361,7 @@ consteval auto json_schema(knot::type<direct_delete>) { return knot::schema<dire
 // once -- so the list is said once and the forward added over it.
 template <class... More>
 using params_of = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok, event::message_new,
-                               event::message_update, event::message_delete, event::message_react, event::file_description, event::group_invite,
+                               event::message_update, event::message_delete, event::message_react, event::file_description, event::contact_request, event::group_link_invite, event::group_link_member, event::group_invite,
                                event::group_accept, event::group_member_info, event::group_member_new, event::group_member_intro,
                                event::group_member_delete, event::group_member_invite, event::group_member_forward, event::group_member_connected, event::group_member_role, event::group_leave,
                                event::group_delete, event::direct_delete, More..., knot::raw>;
