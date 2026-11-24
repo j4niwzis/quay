@@ -28,6 +28,14 @@ cme_declare_port(NAME splice PROVIDES splice
 cme_options(splice "SPLICE_TESTS OFF")
 cme_find_package(splice REQUIRED)
 
+# knot: simplex-chat's JSON read straight into quay.chat's types, and written from them.
+cme_declare_port(NAME knot PROVIDES knot
+  GITHUB_REPOSITORY j4niwzis/knot
+  GIT_TAG 54dd75281fc01014774196a96143d36155b26299
+  LICENSE AGPL-3.0-only
+  TARGETS knot)
+cme_find_package(knot REQUIRED)
+
 set(QUAY_CONSTEXPR_STEPS 100000000 CACHE STRING
   "clang's -fconstexpr-steps for quay and what imports it, as its family sets it")
 
@@ -110,9 +118,9 @@ set_target_properties(quay_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDA
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc src/compression.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc src/compression.cc src/chat.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
-target_link_libraries(quay PUBLIC splice quay_botan quay_zstd PRIVATE quay_sntrup761)
+target_link_libraries(quay PUBLIC splice knot quay_botan quay_zstd PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${QUAY_CONSTEXPR_STEPS}>)
 
@@ -142,7 +150,7 @@ if(QUAY_TESTS)
   else()
     set(quay_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent compression)
+  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent compression chat)
     add_executable(quay-${name}-test test/${name}_test.cc)
     target_include_directories(quay-${name}-test PRIVATE test)
     target_link_libraries(quay-${name}-test PRIVATE quay ${quay_gtest})

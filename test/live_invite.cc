@@ -20,6 +20,7 @@ import quay.session;
 import quay.ratchet;
 import quay.agent;
 import quay.connection;
+import quay.chat;
 
 using namespace quay;
 
@@ -100,7 +101,15 @@ void perform(const connection::output& out, bool& is_connected) {
                                  is_connected = true;
                                },
                                [](const connection::event::message& x) {
-                                 std::println("event: message {}{}: {}", x.id, x.in_sequence ? "" : " (out of sequence)", shown(x.body));
+                                 std::println("event: message {}{}", x.id, x.in_sequence ? "" : " (out of sequence)");
+                                 const auto chats = chat::messages_of(x.body);
+                                 if (!chats) return std::println("  not a chat message: {}", shown(x.body));
+                                 for (const auto& m : *chats)
+                                   spl::visit(spl::overloaded{[](const chat::event::info& i) { std::println("  chat: x.info, {}", i.profile.display_name); },
+                                                              [](const chat::event::info_probe&) { std::println("  chat: x.info.probe"); },
+                                                              [](const chat::event::message_new& n) { std::println("  chat: x.msg.new, {}", n.content.text); },
+                                                              [&](const auto&) { std::println("  chat: {}", m.event); }},
+                                              m.params.data());
                                },
                                [](const connection::event::received& x) { std::println("event: receipt for our message {}", x.id); },
                                [](const connection::event::other&) { std::println("event: another agent message"); },
@@ -162,8 +171,11 @@ int main(int, char** argv) {
         perform(conn.allow(), is_connected);
       }
       if (is_connected && !sent) {
-        const std::string chat = R"({"v":"1-22","msgId":"cXVheXN0YXRlbWFj","event":"x.msg.new","params":{"content":{"type":"text","text":"hello from quay, the inviting side"}}})";
-        auto out = conn.send(bytes(chat.begin(), chat.end()), rng);
+        // Long enough to go compressed: a zstd batch of one, as simplex-chat sends.
+        const auto text = "hello from quay.chat, the inviting side, compressed: " + std::string(300, 'q');
+        const auto body = chat::body_of(chat::message_of(chat::event::message_new{chat::text_content(text)}, "cXVheWNoYXQ="));
+        std::println("our chat message: {} bytes as a compressed batch (from {})", body.size(), text.size());
+        auto out = conn.send(body, rng);
         if (!out) throw std::runtime_error(out.error());
         std::println("sending our message {}", out->first);
         perform(out->second, is_connected);
