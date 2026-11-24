@@ -131,23 +131,27 @@ int main(int, char** argv) {
     if (!link) throw std::runtime_error("not a link: " + text);
     // The CLI's invitation (only its router used), or its contact address.
     const auto queues = spl::visit([](const auto& l) { return l.queues; }, *link);
-    sockaddr_in where{};
-    where.sin_family = AF_INET;
-    where.sin_port = htons(15225);
-    inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
-    fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    timeval wait{20, 0};
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
-    // The one place a C API asks for its own pointer type: sockaddr*.
-    if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
-    const auto facts = read_tls_facts();
-    const auto hello = smp::router_hello_of(read_block());
     const auto router = queues.front().address.router;
-    auto checked = session::verify(*hello, router.identity, facts);
-    if (!checked) throw std::runtime_error("the router is not the one pinned (or not this TLS session's)");
-    verified = std::move(*checked);
-    agreed = verified->version();
-    send_all(*smp::client_hello(agreed, router.identity));
+    // A session with the router: TCP to the relay, the router authenticated, hellos.
+    const auto open_session = [&] {
+      sockaddr_in where{};
+      where.sin_family = AF_INET;
+      where.sin_port = htons(15225);
+      inet_pton(AF_INET, "127.0.0.1", &where.sin_addr);
+      fd = ::socket(AF_INET, SOCK_STREAM, 0);
+      timeval wait{20, 0};
+      ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
+      // The one place a C API asks for its own pointer type: sockaddr*.
+      if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
+      const auto facts = read_tls_facts();
+      const auto hello = smp::router_hello_of(read_block());
+      auto checked = session::verify(*hello, router.identity, facts);
+      if (!checked) throw std::runtime_error("the router is not the one pinned (or not this TLS session's)");
+      verified = std::move(*checked);
+      agreed = verified->version();
+      send_all(*smp::client_hello(agreed, router.identity));
+    };
+    open_session();
 
     link_path = argv[2];
     const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay inviting","fullName":""}}})";
@@ -195,6 +199,13 @@ int main(int, char** argv) {
         if (!back) throw std::runtime_error("the saved connection did not restore");
         conn = std::move(*back);
         std::println("connection saved ({} bytes) and restored", saved.size());
+        // And in a new session, as a program restarted: the old one closed,
+        // our queue subscribed to again -- the CLI's receipt must come through it.
+        ::close(fd);
+        pending.clear();
+        open_session();
+        std::println("a new session with the router; our queue subscribed to again");
+        perform(conn.subscribe(), is_connected);
         // Long enough to go compressed: a zstd batch of one, as simplex-chat sends.
         const auto text = "hello from quay.chat, the inviting side, compressed: " + std::string(300, 'q');
         const auto body = chat::body_of(chat::message_of(chat::event::message_new{chat::text_content(text)}, "cXVheWNoYXQ="));

@@ -114,6 +114,13 @@ class duplex {
   [[nodiscard]] bool connected() const { return connected_; }
   // The queue it receives on: a delivery for this id is this connection's.
   [[nodiscard]] const bytes& queue_id() const { return rcv_id_; }
+  // Its queue subscribed to again -- in a new session with its router, as
+  // after a restart: what waits in the queue is delivered then (delivered()).
+  [[nodiscard]] output subscribe() {
+    output out;
+    if (!rcv_id_.empty()) out.actions.push_back(act(rcv_router_, rcv_id_, smp::command::subscribe{}, authorization::signed_by{rcv_auth_.priv}));
+    return out;
+  }
   [[nodiscard]] bool post_quantum() const { return ratchet_ && ratchet_->support_kem; }
 
   // A message sent to the other side: its id, and the action that sends it.
