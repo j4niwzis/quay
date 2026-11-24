@@ -89,12 +89,30 @@ target_compile_definitions(quay_sntrup761 PRIVATE USE_SNTRUP761X25519)
 target_link_libraries(quay_sntrup761 PUBLIC quay_botan)
 set_target_properties(quay_sntrup761 PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_SCAN_FOR_MODULES OFF)
 
+# ---- zstd ---------------------------------------------------------------------
+# zstd's library from its release, pinned by its hash, built from its own
+# sources: simplex-chat compresses message batches with it (quay.compression).
+set(QUAY_ZSTD_VERSION 1.5.7)
+set(QUAY_ZSTD_SHA256 eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3)
+set(zstd_root "${CMAKE_BINARY_DIR}/_zstd")
+set(zstd_lib "${zstd_root}/zstd-${QUAY_ZSTD_VERSION}/lib")
+if(NOT EXISTS "${zstd_lib}/zstd.h")
+  file(DOWNLOAD "https://github.com/facebook/zstd/releases/download/v${QUAY_ZSTD_VERSION}/zstd-${QUAY_ZSTD_VERSION}.tar.gz"
+       "${zstd_root}/zstd.tar.gz" EXPECTED_HASH SHA256=${QUAY_ZSTD_SHA256} TLS_VERIFY ON)
+  file(ARCHIVE_EXTRACT INPUT "${zstd_root}/zstd.tar.gz" DESTINATION "${zstd_root}")
+endif()
+file(GLOB zstd_sources "${zstd_lib}/common/*.c" "${zstd_lib}/compress/*.c" "${zstd_lib}/decompress/*.c")
+add_library(quay_zstd STATIC ${zstd_sources})
+target_include_directories(quay_zstd SYSTEM PUBLIC "$<BUILD_INTERFACE:${zstd_lib}>")
+target_compile_definitions(quay_zstd PRIVATE ZSTD_DISABLE_ASM ZSTD_MULTITHREAD=0 XXH_NAMESPACE=ZSTD_)
+set_target_properties(quay_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
+
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc)
+  FILES src/bytes.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc src/compression.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
-target_link_libraries(quay PUBLIC splice quay_botan PRIVATE quay_sntrup761)
+target_link_libraries(quay PUBLIC splice quay_botan quay_zstd PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${QUAY_CONSTEXPR_STEPS}>)
 
@@ -124,7 +142,7 @@ if(QUAY_TESTS)
   else()
     set(quay_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent)
+  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent compression)
     add_executable(quay-${name}-test test/${name}_test.cc)
     target_include_directories(quay-${name}-test PRIVATE test)
     target_link_libraries(quay-${name}-test PRIVATE quay ${quay_gtest})
