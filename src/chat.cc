@@ -281,6 +281,12 @@ struct group_member_delete {  // x.grp.mem.del: a member removed
 consteval auto json_schema(knot::type<group_member_delete>) {
   return knot::schema<group_member_delete>().member<"member_id">(knot::key("memberId")).tag("x.grp.mem.del");
 }
+struct group_member_connected {  // x.grp.mem.con: to the host, connected to the member it introduced
+  std::string member_id;
+};
+consteval auto json_schema(knot::type<group_member_connected>) {
+  return knot::schema<group_member_connected>().member<"member_id">(knot::key("memberId")).tag("x.grp.mem.con");
+}
 struct group_leave {};  // x.grp.leave: the sender left
 consteval auto json_schema(knot::type<group_leave>) { return knot::schema<group_leave>().tag("x.grp.leave"); }
 struct group_delete {};  // x.grp.del: the group deleted
@@ -320,7 +326,7 @@ template <class... More>
 using params_of = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok, event::message_new,
                                event::message_update, event::message_delete, event::message_react, event::file_description, event::group_invite,
                                event::group_accept, event::group_member_info, event::group_member_new, event::group_member_intro,
-                               event::group_member_delete, event::group_member_invite, event::group_member_forward, event::group_leave,
+                               event::group_member_delete, event::group_member_invite, event::group_member_forward, event::group_member_connected, event::group_leave,
                                event::group_delete, event::direct_delete, More..., knot::raw>;
 // A message as a host forwards it: a member's, inside x.grp.msg.forward.
 struct forwarded_message {
