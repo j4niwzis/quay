@@ -172,8 +172,11 @@ if(QUAY_TESTS)
     add_executable(quay-fuzz test/fuzz_parsers.cc)
     target_compile_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
-    # libFuzzer's runtime is built on libstdc++, quay on libc++: both linked.
-    target_link_libraries(quay-fuzz PRIVATE quay stdc++)
+    # libFuzzer's runtime is built on libstdc++, quay on libc++: both linked
+    # -- libstdc++ kept though named before the runtime that needs it (the
+    # linker's --as-needed would drop it).
+    target_link_libraries(quay-fuzz PRIVATE quay)
+    target_link_options(quay-fuzz PRIVATE -Wl,--push-state,--no-as-needed -lstdc++ -Wl,--pop-state)
   else()
     add_executable(quay-fuzz test/fuzz_driver.cc)
     target_compile_definitions(quay-fuzz PRIVATE QUAY_FUZZ_LOCAL)
