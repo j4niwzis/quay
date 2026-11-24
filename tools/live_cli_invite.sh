@@ -1,8 +1,9 @@
 #!/bin/bash
-# Runs a live test that invites simplex-chat's CLI (its WebSocket API on
-# 127.0.0.1:5225): the CLI's own invitation asked for only to learn its
-# router, the test started, and the CLI told to join the link the test
-# writes. Usage: live_cli_invite.sh <test binary>
+# Runs a live test that writes a link for simplex-chat's CLI (its WebSocket
+# API on 127.0.0.1:5225) to connect to -- an invitation, or quay's contact
+# address: the CLI's own invitation asked for only to learn its router, the
+# test started, and the CLI told to connect to the link the test writes.
+# Usage: live_cli_invite.sh <test binary>
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d)

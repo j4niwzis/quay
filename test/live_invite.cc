@@ -115,7 +115,9 @@ void perform(const connection::output& out, bool& is_connected) {
                                },
                                [](const connection::event::received& x) { std::println("event: receipt for our message {}", x.id); },
                                [](const connection::event::other&) { std::println("event: another agent message"); },
-                               [](const connection::event::failed& x) { std::println("event: FAILED: {}", x.what); }},
+                               [](const connection::event::failed& x) { std::println("event: FAILED: {}", x.what); },
+                               [](const connection::event::address&) { std::println("event: an address (not this test's)"); },
+                               [](const connection::event::contact_request&) { std::println("event: a contact request (not this test's)"); }},
                e);
 }
 }  // namespace

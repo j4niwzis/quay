@@ -176,6 +176,10 @@ if(QUAY_TESTS)
     add_executable(quay-live_invite test/live_invite.cc)
     target_link_libraries(quay-live_invite PRIVATE quay)
     add_test(NAME live_invite COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_invite.sh $<TARGET_FILE:quay-live_invite>)
+    # quay's own address: the CLI's contact request, accepted.
+    add_executable(quay-live_address test/live_address.cc)
+    target_link_libraries(quay-live_address PRIVATE quay)
+    add_test(NAME live_address COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_invite.sh $<TARGET_FILE:quay-live_address>)
     # And through the CLI's contact address: quay's contact request, accepted.
     add_test(NAME live_contact COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_contact.sh $<TARGET_FILE:quay-live_invite>)
   endif()

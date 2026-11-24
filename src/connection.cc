@@ -84,8 +84,16 @@ struct other {  // an agent message this layer does not act on (queue rotation, 
 struct failed {
   std::string what;
 };
+struct address {  // our contact address, to be published
+  std::string link;
+};
+struct contact_request {  // someone asking to connect through it: their invitation, joined to accept, and what they say (a chat x.contact)
+  agent::link::invitation invitation;
+  bytes info;
+};
 }  // namespace event
-using event_t = spl::variant<event::invitation, event::confirmed, event::connected, event::message, event::received, event::other, event::failed>;
+using event_t = spl::variant<event::invitation, event::confirmed, event::connected, event::message, event::received, event::other, event::failed,
+                             event::address, event::contact_request>;
 
 struct output {
   std::vector<action> actions;
@@ -104,6 +112,8 @@ class duplex {
   duplex& operator=(const duplex&) = delete;
 
   [[nodiscard]] bool connected() const { return connected_; }
+  // The queue it receives on: a delivery for this id is this connection's.
+  [[nodiscard]] const bytes& queue_id() const { return rcv_id_; }
   [[nodiscard]] bool post_quantum() const { return ratchet_ && ratchet_->support_kem; }
 
   // A message sent to the other side: its id, and the action that sends it.
@@ -527,6 +537,73 @@ class inviting : public detail::duplex {
   ratchet::e2e_private private_;
   bool post_quantum_ = true;
   step step_ = step::creating;
+};
+
+// Our own contact address: a queue anyone may send a contact request to,
+// never secured; each request accepted, where the program wants it, by
+// joining the invitation it carries (joining::join).
+class address : public detail::duplex {
+ public:
+  template <crypto::random_source R>
+  static std::pair<address, output> create(smp::router router, R& random) {
+    address a;
+    a.rcv_router_ = std::move(router);
+    a.rcv_auth_ = crypto::generate<curve::ed25519>(random);
+    a.rcv_router_dh_ = crypto::generate<curve::x25519>(random);
+    a.rcv_e2e_ = crypto::generate<curve::x25519>(random);
+    output out;
+    out.actions.push_back(a.act(a.rcv_router_, {},
+                                smp::command::create{a.rcv_auth_.pub, a.rcv_router_dh_.pub, std::nullopt, true,
+                                                     smp::queue_request_t(smp::queue_request::contact{}), std::nullopt},
+                                authorization::signed_by{a.rcv_auth_.priv}));
+    return {std::move(a), std::move(out)};
+  }
+
+  // A router's answer: the queue's ids, and with them the address.
+  template <crypto::random_source R>
+  output answered(std::uint64_t action_id, const smp::response_t& response, R&) {
+    output out;
+    if (response.template get_if<smp::response::failed>()) return failed(out, "the router refused action " + std::to_string(action_id));
+    const auto* ids = response.template get_if<smp::response::queue_ids>();
+    if (!ids || !rcv_id_.empty()) return out;  // an OK to an ACK
+    rcv_id_ = ids->recipient_id, rcv_snd_id_ = ids->sender_id, rcv_server_dh_ = ids->server_dh;
+    agent::link::contact link;
+    link.queues.push_back(agent::queue_uri{{1, agent::current_client_version},
+                                           {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, agent::queue_mode_t(agent::queue_mode::contact{})}});
+    out.events.push_back(event::address{agent::text_of(agent::link_t(link))});
+    return out;
+  }
+
+  // A contact request delivered: its invitation and what it says.
+  template <crypto::random_source R>
+  output delivered(const smp::response::message& got, R&) {
+    output out;
+    const auto e2e = opened(got, out);
+    if (!e2e) return out;
+    const auto body = spl::visit(spl::overloaded{[](const smp::e2e::message& m) { return m.body; }, [](const smp::e2e::confirmation& c) { return c.body; }}, *e2e);
+    const auto envelope = agent::envelope_of(body);
+    const auto* request = envelope ? envelope->template get_if<agent::envelope::invitation>() : nullptr;
+    if (!request) return failed(out, "not a contact request");
+    const auto link = agent::link_of(request->connection_link);
+    const auto* invitation = link ? link->template get_if<agent::link::invitation>() : nullptr;
+    if (!invitation || invitation->queues.empty()) return failed(out, "a contact request without an invitation");
+    out.events.push_back(event::contact_request{*invitation, request->info});
+    return out;
+  }
+
+  [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
+  template <std::ranges::input_range In>
+  static std::expected<address, quay::snapshot::error> restored(In&& from) {
+    address a;
+    if (auto r = quay::snapshot::restore(std::forward<In>(from), a); !r) return std::unexpected(r.error());
+    return a;
+  }
+  template <class D>
+    requires std::same_as<std::remove_const_t<D>, address>
+  friend auto snapshot_fields(D& d) {
+    using base = std::conditional_t<std::is_const_v<D>, const detail::duplex, detail::duplex>;
+    return snapshot_fields(static_cast<base&>(d));
+  }
 };
 
 }  // namespace quay::connection
