@@ -43,16 +43,17 @@ set(QUAY_CONSTEXPR_STEPS 100000000 CACHE STRING
 # Botan 3, as one amalgamated unit of only the modules quay uses, made by
 # Botan's own configure.py at configure time from its release, pinned by
 # its hash -- the curves, NaCl's box (Botan's libsodium-compatible API), AES
-# and GCM, the hashes, HMAC and HKDF -- and built as a static library.
+# and GCM, the hashes, HMAC and HKDF, and TLS 1.3 -- and built as a static library.
 set(QUAY_BOTAN_VERSION 3.14.1)
 set(QUAY_BOTAN_SHA256 d1046b8f5b18b80197cd1d62cf66743edfc0a54ab91bf8e5d916a99212ffc5e0)
 set(QUAY_BOTAN_MODULES
-  x25519 ed25519 x448 ed448 salsa20 poly1305 sodium aes gcm sha2_32 sha2_64 sha3 keccak hkdf hmac system_rng x509)
+  x25519 ed25519 x448 ed448 salsa20 poly1305 sodium aes gcm sha2_32 sha2_64 sha3 keccak hkdf hmac system_rng x509
+  tls13 chacha20poly1305)
 set(botan_root "${CMAKE_BINARY_DIR}/_botan")
 set(botan_source "${botan_root}/botan-${QUAY_BOTAN_VERSION}")
 set(botan_made "${botan_root}/made")
 string(REPLACE ";" "," botan_modules "${QUAY_BOTAN_MODULES}")
-set(botan_stamp "${QUAY_BOTAN_VERSION};${botan_modules};${CMAKE_CXX_COMPILER};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_PROCESSOR}")
+set(botan_stamp "${QUAY_BOTAN_VERSION};eddsa-1;${botan_modules};${CMAKE_CXX_COMPILER};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_PROCESSOR}")
 if(NOT EXISTS "${botan_made}/botan_all.cpp" OR NOT "${QUAY_BOTAN_STAMP}" STREQUAL "${botan_stamp}")
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   if(NOT EXISTS "${botan_source}/configure.py")
@@ -77,6 +78,13 @@ if(NOT EXISTS "${botan_made}/botan_all.cpp" OR NOT "${QUAY_BOTAN_STAMP}" STREQUA
     RESULT_VARIABLE botan_configured)
   if(NOT botan_configured EQUAL 0)
     message(FATAL_ERROR "Botan's configure.py failed (${botan_configured}).")
+  endif()
+  # Botan leaves EdDSA out of TLS 1.3's signature schemes (botan#2958);
+  # SMP routers' certificates are Ed25519 or Ed448: put back (tools/botan_eddsa.py).
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/botan_eddsa.py" "${botan_made}/botan_all.cpp"
+                  RESULT_VARIABLE botan_patched)
+  if(NOT botan_patched EQUAL 0)
+    message(FATAL_ERROR "Botan's amalgamation could not be patched for EdDSA (${botan_patched}).")
   endif()
   set(QUAY_BOTAN_STAMP "${botan_stamp}" CACHE INTERNAL "What Botan's amalgamation was made for")
 endif()
@@ -118,7 +126,7 @@ set_target_properties(quay_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDA
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/snapshot.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/connection.cc src/compression.cc src/chat.cc)
+  FILES src/bytes.cc src/snapshot.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/tls.cc src/connection.cc src/compression.cc src/chat.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice knot quay_botan quay_zstd PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
@@ -160,7 +168,7 @@ if(QUAY_TESTS)
   # it: tools/tls_proxy.py): QUAY_SMP_ADDRESS, QUAY_SMP_FINGERPRINT.
   option(QUAY_LIVE_TESTS "Test against a running smp-server" OFF)
   if(QUAY_LIVE_TESTS)
-    foreach(live IN ITEMS live_smp live_pin)
+    foreach(live IN ITEMS live_smp live_pin live_tls)
       add_executable(quay-${live} test/${live}.cc)
       target_link_libraries(quay-${live} PRIVATE quay)
       add_test(NAME ${live} COMMAND quay-${live})
