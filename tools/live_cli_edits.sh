@@ -48,4 +48,5 @@ sleep 2
 items | tee "$dir/items2.txt"
 grep -q "quay's edited text.*edited" "$dir/items2.txt" || { echo "the CLI does not show quay's edit"; exit 1; }
 grep -q "👍" "$dir/items2.txt" || { echo "the CLI does not show quay's reaction"; exit 1; }
+grep -qi "deleted contact\|contact deleted" "$dir/items2.txt" || { echo "the CLI does not show the contact deleted"; exit 1; }
 exit $status

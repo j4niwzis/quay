@@ -146,6 +146,17 @@ class duplex {
     return out;
   }
   [[nodiscard]] bool switching() const { return next_rcv_.has_value(); }
+  // The connection ended on our side: the queue we receive on deleted (DEL),
+  // and the one we were moving to, where a switch was going on. Tell the
+  // other side first where it should know (a chat's x.direct.del).
+  [[nodiscard]] output remove() {
+    output out;
+    if (!rcv_id_.empty()) out.actions.push_back(act(rcv_router_, rcv_id_, smp::command::remove{}, authorization::signed_by{rcv_auth_.priv}));
+    if (next_rcv_ && !next_rcv_->id.empty())
+      out.actions.push_back(act(next_rcv_->router, next_rcv_->id, smp::command::remove{}, authorization::signed_by{next_rcv_->auth.priv}));
+    connected_ = false;
+    return out;
+  }
   // Whether a delivery for `queue_id` is this connection's (its queue, or the one it is moving to).
   [[nodiscard]] bool owns(std::span<const byte> queue_id) const {
     return std::ranges::equal(queue_id, rcv_id_) || (next_rcv_ && !next_rcv_->id.empty() && std::ranges::equal(queue_id, next_rcv_->id));

@@ -113,9 +113,30 @@ int main(int, char** argv) {
       }
       for (auto todo = std::exchange(later, {}); const auto& out : todo) handle(out);
     }
+    // And the contact ended: x.direct.del said, our queue deleted.
+    bool removed = false;
+    if (answered && updated && reacted && deleted) {
+      send(chat::message_of(chat::event::direct_delete{}));
+      for (auto todo = std::exchange(later, {}); const auto& out : todo) handle(out);
+      for (int i = 0; i < 20 && !removed; ++i) {
+        pump(fd, session);
+        for (const auto& in : session.take_incoming())
+          spl::visit(spl::overloaded{[&](const client::incoming::answered& a) {
+                                       if (a.response.template get_if<smp::response::ok>() && !removed && conn.connected()) {
+                                         // The x.direct.del taken by the router: now the queue.
+                                         session.submit(0, conn.remove(), rng);
+                                         std::println("x.direct.del sent, our queue deleted (DEL)");
+                                       } else if (!conn.connected()) {
+                                         removed = a.response.template get_if<smp::response::ok>() != nullptr;
+                                       }
+                                     },
+                                     [](const auto&) {}},
+                     in);
+      }
+    }
     flush(fd, session);
     ::sleep(2);
-    const bool ok = answered && updated && reacted && deleted;
+    const bool ok = answered && updated && reacted && deleted && removed;
     std::println("live edits: {}", ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
   } catch (const std::exception& failed) {
