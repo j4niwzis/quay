@@ -17,7 +17,7 @@ comes is fed to it, and the caller's transport and control flow carry it.
 | `quay.tls` | TLS 1.3 to a router, sans-IO, on Botan (ALPN `smp/1`; EdDSA certificates, which Botan's TLS leaves out, put back at configure time) |
 | `quay.ratchet` | the post-quantum double ratchet (X448, sntrup761 KEM), as simplexmq's |
 | `quay.agent` | the agent's messages, envelopes, queue addresses and links (`simplex:/invitation`, `simplex:/contact`) |
-| `quay.connection` | duplex connections as state machines: both sides of an invitation by the fast (SKEY) and the standard flow, contact addresses both ways, messages and receipts, following the other side's queue switch, re-subscription, save and restore |
+| `quay.connection` | duplex connections as state machines: both sides of an invitation by the fast (SKEY) and the standard flow, contact addresses both ways, messages and receipts, queue switching both ways, re-subscription, save and restore |
 | `quay.client` | one session with one router for any number of connections: socket bytes in and out, answers and deliveries routed back |
 | `quay.compression` | simplex-chat's compressed batches (zstd) |
 | `quay.chat` | simplex-chat's messages read into types through knot (`x.info`, `x.msg.new`, ...), and written |
@@ -25,9 +25,9 @@ comes is fed to it, and the caller's transport and control flow carry it.
 Tested live, in CI, against smp-server 6.5.0 and simplex-chat 7.1.4's CLI:
 quay invites the CLI and joins its invitations, connects through its address
 and accepts it on quay's own, by both flows; messages, receipts, compressed
-chat, save/restore, re-subscription and queue switching -- over quay's own TLS.
+chat, save/restore, re-subscription and queue switching both ways -- over quay's own TLS.
 
-Not yet: groups, files (XFTP), quay switching its own queues, private
+Not yet: groups, files (XFTP), private
 message routing.
 
 ## Keeping a connection: save before you send

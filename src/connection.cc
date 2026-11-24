@@ -130,6 +130,26 @@ class duplex {
   duplex& operator=(const duplex&) = delete;
 
   [[nodiscard]] bool connected() const { return connected_; }
+  // Our queue moved to a new one on `router` (see next_receive). Only one
+  // switch at a time, and none while the other side's is going on.
+  template <crypto::random_source R>
+  std::expected<output, std::string> switch_queue(smp::router router, R& random) {
+    if (!connected_ || !snd_queue_) return std::unexpected("not connected");
+    if (next_rcv_ || next_snd_) return std::unexpected("a switch is going on");
+    next_receive n{std::move(router), {}, {}, crypto::generate<curve::ed25519>(random), crypto::generate<curve::x25519>(random),
+                   crypto::generate<curve::x25519>(random), {}, std::nullopt};
+    output out;
+    out.actions.push_back(act(n.router, {}, smp::command::create{n.auth.pub, n.router_dh.pub, std::nullopt, true, std::nullopt, std::nullopt},
+                              authorization::signed_by{n.auth.priv}));
+    n.create_action = out.actions.back().id;
+    next_rcv_ = std::move(n);
+    return out;
+  }
+  [[nodiscard]] bool switching() const { return next_rcv_.has_value(); }
+  // Whether a delivery for `queue_id` is this connection's (its queue, or the one it is moving to).
+  [[nodiscard]] bool owns(std::span<const byte> queue_id) const {
+    return std::ranges::equal(queue_id, rcv_id_) || (next_rcv_ && !next_rcv_->id.empty() && std::ranges::equal(queue_id, next_rcv_->id));
+  }
   // How far it has gone: grows with every action it asks for, so with every
   // call that changed it. A snapshot of a lower generation is stale.
   [[nodiscard]] std::uint64_t generation() const { return actions_; }
@@ -164,7 +184,7 @@ class duplex {
     return std::tie(d.rcv_router_, d.rcv_id_, d.rcv_snd_id_, d.rcv_auth_, d.rcv_router_dh_, d.rcv_e2e_, d.rcv_server_dh_, d.rcv_their_e2e_,
                     d.snd_queue_, d.snd_their_dh_, d.snd_auth_, d.snd_e2e_, d.snd_key_, d.agent_version_, d.client_version_, d.ratchet_,
                     d.snd_message_id_, d.rcv_message_id_, d.actions_, d.snd_previous_hash_, d.rcv_previous_hash_, d.connected_,
-                    d.flow_, d.awaiting_, d.got_hello_, d.next_snd_);
+                    d.flow_, d.awaiting_, d.got_hello_, d.next_snd_, d.next_rcv_);
   }
 
   // A receipt for messages received (A_RCVD): each by its id and hash, as
@@ -257,6 +277,14 @@ class duplex {
                                                   out.events.push_back(event::other{*message});
                                                   queues_used(x, random, out);
                                                 },
+                                                [&](const agent::a_message::queue_keys& x) {
+                                                  out.events.push_back(event::other{*message});
+                                                  queue_keys_in(x, out);
+                                                },
+                                                [&](const agent::a_message::test_queues&) {
+                                                  out.events.push_back(event::other{*message});
+                                                  if (next_rcv_ && next_rcv_->their_e2e) switch_done(out);
+                                                },
                                                 [&](const auto&) { out.events.push_back(event::other{*message}); }},
                                 m.body);
                    },
@@ -334,6 +362,83 @@ class duplex {
   }
   std::optional<next_queue> next_snd_;
 
+  // Our own queue moved to a new one, as simplexmq's agent switches: the new
+  // queue made (NEW), QADD to the other side -- it and the queue it
+  // replaces; its QKEY gives its new E2E key and the key its SENDs to the
+  // new queue are signed by: the new queue secured with it (KEY), QUSE
+  // sent; its QTEST on the new queue ends it: the old queue deleted.
+  struct next_receive {
+    smp::router router;
+    bytes id, snd_id;
+    crypto::key_pair<curve::ed25519> auth;
+    crypto::key_pair<curve::x25519> router_dh, e2e;
+    public_key<curve::x25519> server_dh;
+    std::optional<public_key<curve::x25519>> their_e2e;
+    std::uint64_t create_action = 0, secure_action = 0;
+  };
+  std::optional<next_receive> next_rcv_;
+  // An answer to one of the switch's actions: taken here (true), or not one of them.
+  template <crypto::random_source R>
+  bool switch_answered(std::uint64_t action_id, const smp::response_t& response, R& random, output& out) {
+    if (!next_rcv_) return false;
+    if (action_id == next_rcv_->create_action) {
+      const auto* ids = response.template get_if<smp::response::queue_ids>();
+      if (!ids) return failed(out, "no queue ids for our new queue"), true;
+      next_rcv_->id = ids->recipient_id, next_rcv_->snd_id = ids->sender_id, next_rcv_->server_dh = ids->server_dh;
+      const agent::queue_uri uri{{1, agent::current_client_version}, {next_rcv_->router, next_rcv_->snd_id, next_rcv_->e2e.pub, std::nullopt}};
+      if (auto sent = send_a(agent::a_message::add_queues{{{uri, agent::send_queue_address{rcv_router_, rcv_snd_id_}}}}, random, out); !sent)
+        failed(out, sent.error());
+      return true;
+    }
+    if (action_id == next_rcv_->secure_action) {
+      if (auto sent = send_a(agent::a_message::use_queues{{{agent::send_queue_address{next_rcv_->router, next_rcv_->snd_id}, true}}}, random, out); !sent)
+        failed(out, sent.error());
+      return true;
+    }
+    return false;
+  }
+  void queue_keys_in(const agent::a_message::queue_keys& x, output& out) {
+    if (!next_rcv_ || x.queues.empty()) return (void)failed(out, "QKEY: no switch of ours going on");
+    const auto& [info, key] = x.queues.front();
+    if (info.address.sender_id != next_rcv_->snd_id) return (void)failed(out, "QKEY: not our new queue");
+    next_rcv_->their_e2e = info.address.dh;
+    out.actions.push_back(act(next_rcv_->router, next_rcv_->id, smp::command::secure{key}, authorization::signed_by{next_rcv_->auth.priv}));
+    next_rcv_->secure_action = out.actions.back().id;
+  }
+  // QTEST on the new queue: the old one deleted, the new one ours.
+  void switch_done(output& out) {
+    out.actions.push_back(act(rcv_router_, rcv_id_, smp::command::remove{}, authorization::signed_by{rcv_auth_.priv}));
+    auto& n = *next_rcv_;
+    rcv_router_ = n.router, rcv_id_ = n.id, rcv_snd_id_ = n.snd_id, rcv_auth_ = n.auth, rcv_router_dh_ = n.router_dh, rcv_e2e_ = n.e2e;
+    rcv_server_dh_ = n.server_dh, rcv_their_e2e_ = n.their_e2e;
+    next_rcv_.reset();
+  }
+  // A delivery on the new queue, before the switch is done.
+  template <crypto::random_source R>
+  output delivered_on_next(const smp::response::message& got, R& random) {
+    output out;
+    auto& n = *next_rcv_;
+    out.actions.push_back(act(n.router, n.id, smp::command::acknowledge{got.id}, authorization::signed_by{n.auth.priv}));
+    const auto router_key = crypto::box_key_of(n.server_dh, n.router_dh.priv);
+    if (!router_key) return failed(out, "no router key for our new queue");
+    const auto received = smp::router_layer_off(*router_key, got);
+    if (!received) return failed(out, "the router's layer did not come off");
+    const auto* sent = received->template get_if<smp::received::sent>();
+    if (!sent) return out;
+    const auto e2e = smp::e2e_open(sent->message, [&](const std::optional<public_key<curve::x25519>>&) {
+      if (!n.their_e2e) return std::expected<crypto::box_key, crypto::crypto_error>(std::unexpected(crypto::errors::bad_key{}));
+      return crypto::box_key_of(*n.their_e2e, n.e2e.priv);
+    });
+    if (!e2e) return failed(out, "the sender's layer did not come off");
+    const auto* m = e2e->second.template get_if<smp::e2e::message>();
+    if (!m) return failed(out, "not a message on our new queue");
+    const auto envelope = agent::envelope_of(m->body);
+    const auto* env = envelope ? envelope->template get_if<agent::envelope::message>() : nullptr;
+    if (!env) return failed(out, "an envelope this side does not take");
+    agent_message_in(env->encrypted, random, out);
+    return out;
+  }
+
   connection::flow flow_ = flow::fast;
   std::uint64_t awaiting_ = 0;
   bool got_hello_ = false;
@@ -407,6 +512,7 @@ class joining : public detail::duplex {
   output answered(std::uint64_t action_id, const smp::response_t& response, R& random) {
     output out;
     if (response.template get_if<smp::response::failed>()) return failed(out, "the router refused action " + std::to_string(action_id));
+    if (switch_answered(action_id, response, random, out)) return out;
     if (action_id != awaiting_) return out;  // an OK to a SEND or an ACK no step waits for
     switch (step_) {
       case step::creating_reply: {
@@ -430,6 +536,12 @@ class joining : public detail::duplex {
     }
   }
 
+  // A message the router delivered for `queue_id`: to the queue we are moving to, or ours.
+  template <crypto::random_source R>
+  output delivered(std::span<const byte> queue_id, const smp::response::message& got, R& random) {
+    if (next_rcv_ && !next_rcv_->id.empty() && std::ranges::equal(queue_id, next_rcv_->id)) return delivered_on_next(got, random);
+    return delivered(got, random);
+  }
   // A message the router delivered to our reply queue.
   template <crypto::random_source R>
   output delivered(const smp::response::message& got, R& random) {
@@ -564,6 +676,7 @@ class inviting : public detail::duplex {
   output answered(std::uint64_t action_id, const smp::response_t& response, R& random) {
     output out;
     if (response.template get_if<smp::response::failed>()) return failed(out, "the router refused action " + std::to_string(action_id));
+    if (switch_answered(action_id, response, random, out)) return out;
     if (action_id != awaiting_) return out;  // an OK to a SEND or an ACK no step waits for
     switch (step_) {
       case step::creating: {
@@ -636,6 +749,12 @@ class inviting : public detail::duplex {
     }
   }
 
+  // A message the router delivered for `queue_id`: to the queue we are moving to, or ours.
+  template <crypto::random_source R>
+  output delivered(std::span<const byte> queue_id, const smp::response::message& got, R& random) {
+    if (next_rcv_ && !next_rcv_->id.empty() && std::ranges::equal(queue_id, next_rcv_->id)) return delivered_on_next(got, random);
+    return delivered(got, random);
+  }
   // A message the router delivered to our queue: first the joining side's
   // confirmation, then its messages.
   template <crypto::random_source R>

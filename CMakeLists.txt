@@ -189,7 +189,7 @@ if(QUAY_TESTS)
     add_test(NAME live_connection_standard COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli.sh $<TARGET_FILE:quay-live_connection>)
     set_tests_properties(live_invite_standard live_connection_standard PROPERTIES ENVIRONMENT QUAY_FLOW=standard)
     # The CLI speaks first once connected; quay's receipt marks its message delivered.
-    set_tests_properties(live_connection PROPERTIES ENVIRONMENT "QUAY_CLI_SAYS=hello quay, a receipt please;QUAY_CLI_SWITCHES=1")
+    set_tests_properties(live_connection PROPERTIES ENVIRONMENT "QUAY_CLI_SAYS=hello quay, a receipt please;QUAY_CLI_SWITCHES=1;QUAY_OWN_SWITCH=1")
     # A bot's shape: one router session (quay.client) for an address and the contact it accepts.
     add_executable(quay-live_client test/live_client.cc)
     target_link_libraries(quay-live_client PRIVATE quay)
