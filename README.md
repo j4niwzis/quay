@@ -11,10 +11,24 @@ comes is fed to it, and the caller's transport and control flow carry it.
 |---|---|
 | `quay.bytes` | the protocols' encodings: big-endian integers, shortString/largeString, the padded fixed-size blocks, keys as X.509 SubjectPublicKeyInfo (X25519, Ed25519, X448, Ed448), base64url -- read from any input range, written into any sink |
 | `quay.crypto` | on [Botan](https://botan.randombit.net) 3: X25519/X448, Ed25519/Ed448, NaCl box and secretbox (XSalsa20-Poly1305), AES-256-GCM with any IV length (SimpleX's ratchet uses 16 bytes), SHA-256/512, SHA3-256/384, Keccak-256, HMAC-SHA512, HKDF-SHA512; and sntrup761 (OpenSSH's public-domain implementation, vendored) |
+| `quay.snapshot` | a value as bytes and back, written from its type -- for keeping connections between runs |
+| `quay.smp` | SMP: commands and responses, transmissions and blocks, the hellos, the router's and the sender's layers |
+| `quay.session` | the router authenticated: its certificate chain against the identity its address pins, the session key it signs, this TLS session's Finished |
+| `quay.tls` | TLS 1.3 to a router, sans-IO, on Botan (ALPN `smp/1`; EdDSA certificates, which Botan's TLS leaves out, put back at configure time) |
+| `quay.ratchet` | the post-quantum double ratchet (X448, sntrup761 KEM), as simplexmq's |
+| `quay.agent` | the agent's messages, envelopes, queue addresses and links (`simplex:/invitation`, `simplex:/contact`) |
+| `quay.connection` | duplex connections as state machines: both sides of an invitation by the fast (SKEY) and the standard flow, contact addresses both ways, messages and receipts, following the other side's queue switch, re-subscription, save and restore |
+| `quay.client` | one session with one router for any number of connections: socket bytes in and out, answers and deliveries routed back |
+| `quay.compression` | simplex-chat's compressed batches (zstd) |
+| `quay.chat` | simplex-chat's messages read into types through knot (`x.info`, `x.msg.new`, ...), and written |
 
-Next: the SMP client (commands, transmissions, private routing), the agent
-(connections, envelopes, the PQ double ratchet, links), the chat protocol,
-XFTP.
+Tested live, in CI, against smp-server 6.5.0 and simplex-chat 7.1.4's CLI:
+quay invites the CLI and joins its invitations, connects through its address
+and accepts it on quay's own, by both flows; messages, receipts, compressed
+chat, save/restore, re-subscription and queue switching -- over quay's own TLS.
+
+Not yet: groups, files (XFTP), quay switching its own queues, private
+message routing.
 
 ## Keeping a connection: save before you send
 
@@ -29,9 +43,10 @@ holds private and chain keys: keep it as secret as the keys themselves.
 
 ## Building
 
-CMake 4.3, clang 23 with libc++ (`import std`). Botan is fetched at its
-release, pinned by hash, and only the modules quay uses are amalgamated
-and built (Python 3 runs its configure.py). Tests: googletest, against
+CMake 4.3, clang 23 with libc++ (`import std`). Botan and zstd are fetched
+at their releases, pinned by hash; only the Botan modules quay uses are
+amalgamated and built (Python 3 runs its configure.py). knot comes as a
+port. Tests: googletest, against
 vectors from independent implementations -- Python's cryptography
 (OpenSSL), libsodium's own tests, and liboqs's known answers for sntrup761.
 
