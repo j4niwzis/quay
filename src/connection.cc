@@ -164,7 +164,7 @@ class duplex {
     return std::tie(d.rcv_router_, d.rcv_id_, d.rcv_snd_id_, d.rcv_auth_, d.rcv_router_dh_, d.rcv_e2e_, d.rcv_server_dh_, d.rcv_their_e2e_,
                     d.snd_queue_, d.snd_their_dh_, d.snd_auth_, d.snd_e2e_, d.snd_key_, d.agent_version_, d.client_version_, d.ratchet_,
                     d.snd_message_id_, d.rcv_message_id_, d.actions_, d.snd_previous_hash_, d.rcv_previous_hash_, d.connected_,
-                    d.flow_, d.awaiting_, d.got_hello_);
+                    d.flow_, d.awaiting_, d.got_hello_, d.next_snd_);
   }
 
   // A receipt for messages received (A_RCVD): each by its id and hash, as
@@ -249,6 +249,14 @@ class duplex {
                                                   for (const auto& r : x.receipts) out.events.push_back(event::received{r.message_id});
                                                 },
                                                 [&](const agent::a_message::hello&) { got_hello_ = true; },
+                                                [&](const agent::a_message::add_queues& x) {
+                                                  out.events.push_back(event::other{*message});
+                                                  queues_added(x, random, out);
+                                                },
+                                                [&](const agent::a_message::use_queues& x) {
+                                                  out.events.push_back(event::other{*message});
+                                                  queues_used(x, random, out);
+                                                },
                                                 [&](const auto&) { out.events.push_back(event::other{*message}); }},
                                 m.body);
                    },
@@ -272,6 +280,59 @@ class duplex {
     snd_previous_hash_ = agent::message_hash(plain);
     return {};
   }
+
+  // An agent message of ours sent: numbered and hashed in turn.
+  template <crypto::random_source R>
+  std::expected<void, std::string> send_a(agent::a_message_t body, R& random, output& out) {
+    const std::uint64_t id = ++snd_message_id_;
+    bytes plain;
+    agent::put_agent_message(plain, agent::agent_message::message{{id, snd_previous_hash_}, std::move(body)});
+    if (auto sent = send_agent_message(plain, random, out); !sent) return sent;
+    snd_previous_hash_ = agent::message_hash(plain);
+    return {};
+  }
+  // The other side moving the queue it receives on -- ours to send to --
+  // to a new one, as simplexmq's agent switches queues: QADD gives the new
+  // queue and the one it replaces; we answer QKEY on the old one -- our new
+  // E2E key, and the key our SENDs to the new queue will be signed by, for
+  // the other side to secure it with (KEY); QUSE says it is secured: from
+  // then on we send to it, QTEST first.
+  struct next_queue {
+    agent::send_queue_address address;
+    crypto::key_pair<curve::ed25519> auth;
+    crypto::key_pair<curve::x25519> e2e;
+    crypto::box_key key{};
+    std::uint16_t client_version = agent::current_client_version;
+  };
+  template <crypto::random_source R>
+  void queues_added(const agent::a_message::add_queues& x, R& random, output& out) {
+    if (x.queues.empty() || !snd_queue_) return;
+    const auto& [uri, replaced] = x.queues.front();
+    if (!replaced || *replaced != *snd_queue_) return (void)failed(out, "QADD: not replacing the queue we send to");
+    next_queue n{{uri.address.router, uri.address.sender_id},
+                 crypto::generate<curve::ed25519>(random),
+                 crypto::generate<curve::x25519>(random),
+                 {},
+                 std::min<std::uint16_t>(uri.client_versions.max, agent::current_client_version)};
+    const auto key = crypto::box_key_of(uri.address.dh, n.e2e.priv);
+    if (!key) return (void)failed(out, "QADD: the new queue's key refuses ours");
+    n.key = *key;
+    const agent::queue_info info{n.client_version, {n.address.router, n.address.sender_id, n.e2e.pub, uri.address.mode}};
+    if (auto sent = send_a(agent::a_message::queue_keys{{{info, smp::auth_key(n.auth.pub)}}}, random, out); !sent) return (void)failed(out, sent.error());
+    next_snd_ = std::move(n);
+  }
+  template <crypto::random_source R>
+  void queues_used(const agent::a_message::use_queues& x, R& random, output& out) {
+    if (x.queues.empty() || !next_snd_ || x.queues.front().first != next_snd_->address) return (void)failed(out, "QUSE: not the queue we were given");
+    snd_queue_ = next_snd_->address;
+    snd_auth_ = next_snd_->auth;
+    snd_e2e_ = next_snd_->e2e;
+    snd_key_ = next_snd_->key;
+    client_version_ = next_snd_->client_version;
+    next_snd_.reset();
+    if (auto sent = send_a(agent::a_message::test_queues{{*snd_queue_}}, random, out); !sent) return (void)failed(out, sent.error());
+  }
+  std::optional<next_queue> next_snd_;
 
   connection::flow flow_ = flow::fast;
   std::uint64_t awaiting_ = 0;

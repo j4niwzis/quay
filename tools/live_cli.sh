@@ -25,6 +25,8 @@ for _ in $(seq 1 150); do grep -q "event: connected" "$dir/test.log" && break; s
 name=$(sed -n 's/^our name: //p' "$dir/test.log")
 sleep 1
 timeout 30 python3 "$here/cli_ws.py" 5225 "@$name $QUAY_CLI_SAYS" > /dev/null || true
+# And, where asked, the CLI moves its receiving queue: quay must follow.
+if [ -n "$QUAY_CLI_SWITCHES" ]; then sleep 2; timeout 30 python3 "$here/cli_ws.py" 5225 "/switch @$name" > /dev/null || true; fi
 wait $test_pid; status=$?
 timeout 20 python3 "$here/cli_ws.py" 5225 "/tail @$name 3" | python3 -c '
 import json, sys

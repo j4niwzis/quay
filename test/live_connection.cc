@@ -39,6 +39,7 @@ std::optional<session::verified> verified;
 crypto::system_random rng;
 std::map<smp::corr_id, std::uint64_t> pending;
 std::vector<agent::receipt> to_receipt;  // messages to send a receipt for
+bool switched = false;  // the CLI's queue switched, QUSE answered
 std::string shown(std::span<const byte> b) {
   std::string out;
   for (const byte c : b.first(std::min<std::size_t>(200, b.size()))) out += (c >= 32 && c < 127) ? static_cast<char>(c) : '.';
@@ -79,7 +80,19 @@ void perform(const connection::output& out, bool& is_connected) {
                                               m.params.data());
                                },
                                [](const connection::event::received& x) { std::println("event: receipt for our message {}", x.id); },
-                               [](const connection::event::other&) { std::println("event: another agent message"); },
+                               [](const connection::event::other& o) {
+                                 spl::visit(spl::overloaded{[](const agent::agent_message::message& m) {
+                                                              spl::visit(spl::overloaded{[](const agent::a_message::add_queues&) { std::println("event: QADD, the CLI moves its queue"); },
+                                                                                         [](const agent::a_message::use_queues&) {
+                                                                                           std::println("event: QUSE, its new queue secured");
+                                                                                           switched = true;
+                                                                                         },
+                                                                                         [](const auto&) { std::println("event: another agent message"); }},
+                                                                         m.body);
+                                                            },
+                                                            [](const auto&) { std::println("event: another agent message"); }},
+                                            o.message);
+                               },
                                [](const connection::event::failed& x) { std::println("event: FAILED: {}", x.what); },
                                [](const connection::event::address&) { std::println("event: an address (not this test's)"); },
                                [](const connection::event::contact_request&) { std::println("event: a contact request (not this test's)"); }},
@@ -118,7 +131,7 @@ int main(int, char** argv) {
     auto joined = connection::joining::join(inv, router, bytes(profile.begin(), profile.end()), rng, flow_asked());
     if (!joined) throw std::runtime_error(joined.error());
     auto& [conn, first] = *joined;
-    bool is_connected = false, sent = false, receipted = false;
+    bool is_connected = false, sent = false, receipted = false, sent_after = false;
     perform(first, is_connected);
     for (int i = 0; i < 40; ++i) {
       bytes block;
@@ -145,6 +158,15 @@ int main(int, char** argv) {
         to_receipt.clear();
         receipted = true;
       }
+      // The CLI's queue switched (QADD, QUSE answered): a message again, to the new queue.
+      if (switched && !sent_after) {
+        const auto body = chat::body_of(chat::message_of(chat::event::message_new{chat::text_content("hello again, on your new queue")}, "cXVheWFnYWlu"));
+        auto out = conn.send(body, rng);
+        if (!out) throw std::runtime_error(out.error());
+        std::println("sending our message {} to the new queue", out->first);
+        perform(out->second, is_connected);
+        sent_after = true;
+      }
       if (is_connected && !sent) {
         // As a program restarted would: the connection saved, and taken back from the bytes alone.
         const auto saved = conn.saved();
@@ -165,6 +187,9 @@ int main(int, char** argv) {
         sent = true;
       }
     }
+    // Where the CLI switched its queue (QUAY_CLI_SWITCHES), a message sent to the new one too.
+    if (std::getenv("QUAY_CLI_SWITCHES") && !sent_after) std::println("no message to the new queue");
+    if (std::getenv("QUAY_CLI_SWITCHES") && !sent_after) return 1;
     // Where the CLI was asked to say something (QUAY_CLI_SAYS), a receipt sent for it too.
     const bool ok = is_connected && sent && (!std::getenv("QUAY_CLI_SAYS") || receipted);
     std::println("live connection: {}", ok ? "passed" : "FAILED");
