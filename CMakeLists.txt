@@ -166,6 +166,22 @@ if(QUAY_TESTS)
   endforeach()
   # Against a real router (CI runs smp-server; the tests reach it by quay.tls):
   # QUAY_SMP_ADDRESS, QUAY_SMP_FINGERPRINT.
+  # The parsers fuzzed: with libFuzzer (QUAY_FUZZ) or, without it, a driver of quay's own.
+  option(QUAY_FUZZ "Build the parsers' fuzzer with libFuzzer" OFF)
+  if(QUAY_FUZZ)
+    add_executable(quay-fuzz test/fuzz_parsers.cc)
+    target_compile_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_libraries(quay-fuzz PRIVATE quay)
+  else()
+    add_executable(quay-fuzz test/fuzz_driver.cc)
+    target_compile_definitions(quay-fuzz PRIVATE QUAY_FUZZ_LOCAL)
+    target_include_directories(quay-fuzz PRIVATE test)
+    target_link_libraries(quay-fuzz PRIVATE quay)
+    add_test(NAME fuzz COMMAND quay-fuzz 60 ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/chat.json ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/forward.json
+             ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/invite.json ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/pkey.txt ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/sids.txt
+             ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/hpack.bin)
+  endif()
   option(QUAY_LIVE_TESTS "Test against a running smp-server" OFF)
   if(QUAY_LIVE_TESTS)
     foreach(live IN ITEMS live_smp live_pin live_tls live_xftp)

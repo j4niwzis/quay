@@ -1,0 +1,11 @@
+chunkSize: 64kb
+digest: BrkeAnCRoIDKyzFbavIu9-W5WKN9gBmBlQ9syLkdOqJtgCV6kZcgaWijTxRy_ag3inRe6mEWg0qlfodcmuAfEA==
+key: 0MTubq5ZIH6KFW574WXJE2o3L21S-nhakdXo_ervRtY=
+nonce: z-efmnIVBEmf2WEQ3M-FIut3upoypOyy
+party: recipient
+replicas:
+- chunks:
+  - 1:zUkzZ8sjKYWKVRL4nK9VxQ==:MC4CAQAwBQYDK2VwBCIEIEGwdFx1tz9wv1BB7XhhrzSYYQANx1jDz7G-TyLiwhNB:5RxRXWS8uWh9wE6VKUfMdRamJjTwxnYokWqzywt4iec=
+  - 2:QIE9wDtMcDDYTNvE4ZdVHQ==:MC4CAQAwBQYDK2VwBCIEIAhFzOlVIPM4ofCQuz1M41HmSpHcKjeDghkAdA_khzHE:uerursMFhwIDvGHS-S_9cFee5X7V_kd2nQ9zFXtn6Js=
+  server: xftp://gR27NKRvDounCeP5IQIwwCmnxdwuaB7zmXR2EG2smO4=@127.0.0.1:15443
+size: 128kb
