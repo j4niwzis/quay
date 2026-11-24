@@ -28,9 +28,10 @@ comes is fed to it, and the caller's transport and control flow carry it.
 Tested live, in CI, against smp-server 6.5.0 and simplex-chat 7.1.4's CLI:
 quay invites the CLI and joins its invitations, connects through its address
 and accepts it on quay's own, by both flows; messages, receipts, compressed
-chat, save/restore, re-subscription and queue switching both ways -- over quay's own TLS.
+chat, files both ways over XFTP, save/restore, re-subscription and queue switching
+both ways -- over quay's own TLS.
 
-Not yet: sending files to a chat (receiving them works), groups, private message routing.
+Not yet: groups, private message routing.
 
 ## Keeping a connection: save before you send
 
