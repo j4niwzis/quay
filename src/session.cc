@@ -56,18 +56,19 @@ using pin_error = spl::variant<errors::chain_shape, errors::bad_certificate, err
 
 // A router's session, authenticated: made by verify() alone.
 class verified;
-std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls);
+std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls,
+                                         smp::version_range ours = {smp::min_version, smp::max_version});
 class verified {
  public:
   [[nodiscard]] const smp::router_hello& hello() const { return hello_; }
   [[nodiscard]] std::span<const byte> id() const { return hello_.session_id; }
   [[nodiscard]] const public_key<curve::x25519>& router_key() const { return router_key_; }  // what deniable authenticators are keyed by
-  [[nodiscard]] std::uint16_t version() const { return version_; }  // the SMP version both speak
+  [[nodiscard]] std::uint16_t version() const { return version_; }  // the version both speak (SMP's, or XFTP's)
 
  private:
   verified(smp::router_hello hello, public_key<curve::x25519> key, std::uint16_t version)
       : hello_(std::move(hello)), router_key_(key), version_(version) {}
-  friend std::expected<verified, pin_error> verify(const smp::router_hello&, std::span<const byte>, const tls_facts&);
+  friend std::expected<verified, pin_error> verify(const smp::router_hello&, std::span<const byte>, const tls_facts&, smp::version_range);
   smp::router_hello hello_;
   public_key<curve::x25519> router_key_;
   std::uint16_t version_ = 0;
@@ -119,7 +120,8 @@ inline std::optional<signed_object> signed_object_of(std::span<const byte> der) 
 }
 }  // namespace detail
 
-inline std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls) {
+inline std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls,
+                                                smp::version_range ours) {
   const auto& chain = tls.peer_chain;
   if (chain.size() < 2 || chain.size() > 4) return std::unexpected(errors::chain_shape{chain.size()});
   std::vector<std::unique_ptr<Botan::X509_Certificate>> certificates;
@@ -159,7 +161,7 @@ inline std::expected<verified, pin_error> verify(const smp::router_hello& hello,
   if (!session_key) return std::unexpected(errors::no_session_key{});
   // The session: this TLS connection's, not another's relayed.
   if (hello.session_id != tls.finished) return std::unexpected(errors::session{});
-  const auto agreed = smp::agreed_version(hello.versions);
+  const auto agreed = smp::agreed_version(hello.versions, ours);
   if (!agreed) return std::unexpected(errors::version{});
   return verified{hello, *session_key, *agreed};
 }
