@@ -126,7 +126,7 @@ set_target_properties(quay_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDA
 # ---- quay ---------------------------------------------------------------------
 add_library(quay)
 target_sources(quay PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/bytes.cc src/snapshot.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/tls.cc src/connection.cc src/client.cc src/compression.cc src/chat.cc)
+  FILES src/bytes.cc src/snapshot.cc src/crypto.cc src/smp.cc src/ratchet.cc src/agent.cc src/session.cc src/tls.cc src/hpack.cc src/http2.cc src/connection.cc src/client.cc src/compression.cc src/chat.cc)
 target_compile_features(quay PUBLIC cxx_std_26)
 target_link_libraries(quay PUBLIC splice knot quay_botan quay_zstd PRIVATE quay_sntrup761)
 target_compile_options(quay PUBLIC
@@ -158,7 +158,7 @@ if(QUAY_TESTS)
   else()
     set(quay_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent compression chat)
+  foreach(name IN ITEMS bytes crypto sntrup761_kat smp ratchet agent compression chat hpack http2)
     add_executable(quay-${name}-test test/${name}_test.cc)
     target_include_directories(quay-${name}-test PRIVATE test)
     target_link_libraries(quay-${name}-test PRIVATE quay ${quay_gtest})

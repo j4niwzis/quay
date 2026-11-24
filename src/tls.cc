@@ -81,16 +81,17 @@ export namespace quay::tls {
 
 class client {
  public:
-  // A handshake begun with the router named `host` (its SNI) on `port`;
-  // what it first sends is in take_outgoing().
-  client(const std::string& host, std::uint16_t port)
+  // A handshake begun with the router named `host` (its SNI) on `port`,
+  // offering `alpn` (smp/1 for SMP, xftp/1 for XFTP); what it first sends
+  // is in take_outgoing().
+  client(const std::string& host, std::uint16_t port, std::vector<std::string> alpn = {"smp/1"})
       : callbacks_(std::make_shared<detail::callbacks>()),
         sessions_(std::make_shared<Botan::TLS::Session_Manager_Noop>()),
         credentials_(std::make_shared<detail::credentials>()),
         policy_(std::make_shared<detail::policy>()),
         random_(std::make_shared<Botan::System_RNG>()),
         channel_(std::make_unique<Botan::TLS::Client>(callbacks_, sessions_, credentials_, policy_, random_, Botan::TLS::Server_Information(host, port),
-                                                      Botan::TLS::Protocol_Version(Botan::TLS::Version_Code::TLS_V13), std::vector<std::string>{"smp/1"})) {}
+                                                      Botan::TLS::Protocol_Version(Botan::TLS::Version_Code::TLS_V13), std::move(alpn))) {}
   client(client&&) = default;
   client& operator=(client&&) = default;
 
