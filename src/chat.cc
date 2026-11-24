@@ -77,6 +77,36 @@ inline kind_t kind_of(const content& c) {
 }
 inline content text_content(std::string text) { return content{"text", std::move(text), {}, {}, {}, {}}; }
 
+// A file sent through XFTP: its name and size, and its description -- the
+// text quay.xfile reads -- in parts, the first one here, the rest in
+// x.msg.file.descr messages.
+struct file_description_part {
+  std::string text;
+  std::int64_t part = 0;
+  bool complete = false;
+};
+consteval auto json_schema(knot::type<file_description_part>) {
+  return knot::schema<file_description_part>()
+      .member<"text">(knot::key("fileDescrText"))
+      .member<"part">(knot::key("fileDescrPartNo"))
+      .member<"complete">(knot::key("fileDescrComplete"));
+}
+struct file_invitation {
+  std::string file_name;
+  std::int64_t file_size = 0;
+  std::optional<file_description_part> description;
+  std::optional<knot::raw> digest, connection_link, inline_mode;
+};
+consteval auto json_schema(knot::type<file_invitation>) {
+  return knot::schema<file_invitation>()
+      .member<"file_name">(knot::key("fileName"))
+      .member<"file_size">(knot::key("fileSize"))
+      .member<"description">(knot::key("fileDescr"))
+      .member<"digest">(knot::key("fileDigest"))
+      .member<"connection_link">(knot::key("fileConnReq"))
+      .member<"inline_mode">(knot::key("fileInline"));
+}
+
 // A reaction: an emoji, or one of simplex-chat's own.
 struct reaction {
   std::string type;
@@ -102,7 +132,8 @@ struct info_probe_ok {  // x.info.probe.ok
 struct ok {};  // x.ok
 struct message_new {  // x.msg.new
   chat::content content;
-  std::optional<knot::raw> quote, parent, forward, file, mentions;
+  std::optional<knot::raw> quote, parent, forward, mentions;
+  std::optional<file_invitation> file;
   std::optional<std::int64_t> ttl;
   std::optional<bool> live;
 };
@@ -122,6 +153,16 @@ struct message_react {  // x.msg.react
   chat::reaction reaction;
   bool add = true;
 };
+struct file_description {  // x.msg.file.descr: a further part of a file's description
+  std::string message_id;
+  file_description_part description;
+};
+consteval auto json_schema(knot::type<file_description>) {
+  return knot::schema<file_description>()
+      .member<"message_id">(knot::key("msgId"))
+      .member<"description">(knot::key("fileDescr"))
+      .tag("x.msg.file.descr");
+}
 struct direct_delete {};  // x.direct.del: the contact deleted us
 consteval auto json_schema(knot::type<info>) { return knot::schema<info>().tag("x.info"); }
 consteval auto json_schema(knot::type<info_probe>) { return knot::schema<info_probe>().tag("x.info.probe"); }
@@ -151,7 +192,7 @@ consteval auto json_schema(knot::type<direct_delete>) { return knot::schema<dire
 }  // namespace event
 // The params, chosen by the event; any other event's kept as its JSON text.
 using params_t = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok,
-                              event::message_new, event::message_update, event::message_delete, event::message_react,
+                              event::message_new, event::message_update, event::message_delete, event::message_react, event::file_description,
                               event::direct_delete, knot::raw>;
 
 struct message {
@@ -219,5 +260,30 @@ inline bytes body_of(const message& m, bool compress = true) {
   (void)compression::put_batch(out, pieces);  // one piece: it cannot fail
   return out;
 }
+
+// A file's description put together from its parts, by the message that
+// offered the file: the whole text once the part saying it is complete comes.
+class file_descriptions {
+ public:
+  // A file offered (x.msg.new with a file): its first part.
+  std::optional<std::string> offered(const std::optional<std::string>& message_id, const file_invitation& file) {
+    if (!message_id || !file.description) return std::nullopt;
+    return add(*message_id, *file.description);
+  }
+  // A further part (x.msg.file.descr).
+  std::optional<std::string> more(const event::file_description& d) { return add(d.message_id, d.description); }
+
+ private:
+  std::optional<std::string> add(const std::string& id, const file_description_part& part) {
+    auto& parts = parts_[id];
+    if (static_cast<std::int64_t>(parts.size()) != part.part) return std::nullopt;  // out of order: not ours to guess
+    parts.push_back(part.text);
+    if (!part.complete) return std::nullopt;
+    auto whole = parts | std::views::join | std::ranges::to<std::string>();
+    parts_.erase(id);
+    return whole;
+  }
+  std::map<std::string, std::vector<std::string>> parts_;
+};
 
 }  // namespace quay::chat

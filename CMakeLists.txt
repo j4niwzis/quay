@@ -194,6 +194,10 @@ if(QUAY_TESTS)
     add_executable(quay-live_xfile test/live_xfile.cc)
     target_link_libraries(quay-live_xfile PRIVATE quay)
     add_test(NAME live_xfile COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_xftp_cli.sh $<TARGET_FILE:quay-live_xfile>)
+    # A file from the CLI, as a chat sends one: offered, its description in parts, got over XFTP.
+    add_executable(quay-live_chat_file test/live_chat_file.cc)
+    target_link_libraries(quay-live_chat_file PRIVATE quay)
+    add_test(NAME live_chat_file COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_file.sh $<TARGET_FILE:quay-live_chat_file>)
     # A bot's shape: one router session (quay.client) for an address and the contact it accepts.
     add_executable(quay-live_client test/live_client.cc)
     target_link_libraries(quay-live_client PRIVATE quay)

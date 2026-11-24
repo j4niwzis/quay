@@ -23,14 +23,14 @@ comes is fed to it, and the caller's transport and control flow carry it.
 | `quay.xftp` | XFTP: a session with a files router (the handshake, the router authenticated), FNEW/FADD/FPUT/FGET/FACK/FDEL, chunks opened |
 | `quay.xfile` | files over XFTP: a file sealed whole and cut into chunks, as simplexmq's xftp does, and file descriptions read and written |
 | `quay.compression` | simplex-chat's compressed batches (zstd) |
-| `quay.chat` | simplex-chat's messages read into types through knot (`x.info`, `x.msg.new`, ...), and written |
+| `quay.chat` | simplex-chat's messages read into types through knot (`x.info`, `x.msg.new` with its file, `x.msg.file.descr`, ...), and written; a file's description put together from its parts |
 
 Tested live, in CI, against smp-server 6.5.0 and simplex-chat 7.1.4's CLI:
 quay invites the CLI and joins its invitations, connects through its address
 and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, save/restore, re-subscription and queue switching both ways -- over quay's own TLS.
 
-Not yet: chat's file messages (x.file), groups, private message routing.
+Not yet: sending files to a chat (receiving them works), groups, private message routing.
 
 ## Keeping a connection: save before you send
 
