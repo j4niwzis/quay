@@ -368,6 +368,20 @@ class inviting : public detail::duplex {
     return {std::move(c), std::move(out)};
   }
 
+  // An invitation made as invite() makes it, and sent to a contact address
+  // (simplex:/contact) as a contact request -- `request_info` what it says
+  // (a chat x.contact), `info` what our confirmation says once the address's
+  // owner accepts and joins it (a chat x.info).
+  template <crypto::random_source R>
+  static std::expected<std::pair<inviting, output>, std::string> invite_through(const agent::link::contact& address, smp::router router,
+                                                                                bytes request_info, bytes info, bool post_quantum, R& random) {
+    if (address.queues.empty()) return std::unexpected("an address without a queue");
+    auto [c, out] = invite(std::move(router), std::move(info), post_quantum, random);
+    c.through_ = address;
+    c.request_info_ = std::move(request_info);
+    return std::pair{std::move(c), std::move(out)};
+  }
+
   // A router's answer to an action.
   template <crypto::random_source R>
   output answered(std::uint64_t action_id, const smp::response_t& response, R& random) {
@@ -383,8 +397,26 @@ class inviting : public detail::duplex {
                                                {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, agent::queue_mode_t(agent::queue_mode::messaging{})}});
         link.e2e = agent::e2e_params_uri{{ratchet::kdf_x3dh_version, ratchet::current_version}, params_.key1, params_.key2, std::nullopt};
         if (params_.kem) link.e2e.kem_key = params_.kem->template get_if<ratchet::kem_params::proposed>()->key;
-        out.events.push_back(event::invitation{agent::text_of(agent::link_t(link))});
+        const auto text = agent::text_of(agent::link_t(link));
+        out.events.push_back(event::invitation{text});
         step_ = step::invited;
+        if (through_) {
+          // The contact request: our link and what it says, sealed to the
+          // address's queue under a key used once, the queue never secured.
+          const auto& q = through_->queues.front();
+          const auto once = crypto::generate<curve::x25519>(random);
+          const auto key = crypto::box_key_of(q.address.dh, once.priv);
+          if (!key) return failed(out, "the address's key refuses ours");
+          bytes envelope;
+          agent::put_envelope(envelope, agent::envelope::invitation{std::min<std::uint16_t>(through_->agent_versions.max, agent::current_agent_version),
+                                                                    text, request_info_});
+          const auto sealed = smp::e2e_confirmation(*key, std::min<std::uint16_t>(q.client_versions.max, agent::current_client_version), once.pub,
+                                                    std::nullopt, envelope, random);
+          if (!sealed) return failed(out, "the contact request could not be sealed");
+          out.actions.push_back(act(q.address.router, q.address.sender_id, smp::command::send{true, *sealed}, authorization::none{}));
+          through_.reset();
+          request_info_.clear();
+        }
         return out;
       }
       case step::securing_theirs: {
@@ -488,6 +520,8 @@ class inviting : public detail::duplex {
 
  private:
   enum class step { creating, invited, confirmed, securing_theirs, confirming, done };
+  std::optional<agent::link::contact> through_;  // until the contact request is sent
+  bytes request_info_;
   bytes info_;
   ratchet::e2e_params params_;
   ratchet::e2e_private private_;

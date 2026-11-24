@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // quay.connection's inviting side against simplex-chat's CLI: our
-// invitation made by the state machine alone, written out for the CLI to
-// join (tools/live_cli_invite.sh), its confirmation allowed, and a message
-// sent once connected. The router is the one the CLI's own invitation names.
+// invitation made by the state machine alone and either written out for the
+// CLI to join (tools/live_cli_invite.sh), or -- given the CLI's contact
+// address (tools/live_cli_contact.sh) -- sent to it as a contact request the
+// CLI accepts; its confirmation allowed, and a message sent once connected.
+// The router is the one the CLI's own invitation or address names.
 // Over plain TCP to a TLS relay in front of the router.
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -124,7 +126,9 @@ int main(int, char** argv) {
     std::ifstream file(argv[1]);
     const std::string text((std::istreambuf_iterator<char>(file)), {});
     const auto link = agent::link_of(text);
-    const auto& inv = *link->template get_if<agent::link::invitation>();
+    if (!link) throw std::runtime_error("not a link: " + text);
+    // The CLI's invitation (only its router used), or its contact address.
+    const auto queues = spl::visit([](const auto& l) { return l.queues; }, *link);
     sockaddr_in where{};
     where.sin_family = AF_INET;
     where.sin_port = htons(15225);
@@ -136,7 +140,7 @@ int main(int, char** argv) {
     if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
     const auto facts = read_tls_facts();
     const auto hello = smp::router_hello_of(read_block());
-    const auto router = inv.queues.front().address.router;
+    const auto router = queues.front().address.router;
     auto checked = session::verify(*hello, router.identity, facts);
     if (!checked) throw std::runtime_error("the router is not the one pinned (or not this TLS session's)");
     verified = std::move(*checked);
@@ -145,7 +149,19 @@ int main(int, char** argv) {
 
     link_path = argv[2];
     const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay inviting","fullName":""}}})";
-    auto [conn, first] = connection::inviting::invite(router, bytes(profile.begin(), profile.end()), true, rng);
+    const std::string request = R"({"v":"1-22","event":"x.contact","params":{"profile":{"displayName":"quay inviting","fullName":""}}})";
+    auto made = spl::visit(spl::overloaded{[&](const agent::link::invitation&) {
+                                             return std::expected<std::pair<connection::inviting, connection::output>, std::string>(
+                                                 connection::inviting::invite(router, bytes(profile.begin(), profile.end()), true, rng));
+                                           },
+                                           [&](const agent::link::contact& address) {
+                                             std::println("through the CLI's contact address");
+                                             return connection::inviting::invite_through(address, router, bytes(request.begin(), request.end()),
+                                                                                         bytes(profile.begin(), profile.end()), true, rng);
+                                           }},
+                           *link);
+    if (!made) throw std::runtime_error(made.error());
+    auto& [conn, first] = *made;
     bool is_connected = false, sent = false;
     perform(first, is_connected);
     for (int i = 0; i < 40; ++i) {
