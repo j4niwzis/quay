@@ -32,6 +32,13 @@ import quay.snapshot;
 
 export namespace quay::connection {
 
+// How a connection is made: by the fast flow, the joining side securing the
+// invitation's queue itself (SKEY) and the inviting side the reply queue;
+// or by the standard one, each side giving the other the key its SENDs are
+// signed by, each securing its own queue with it (KEY), then HELLO both
+// ways -- for peers whose queues do not let their senders secure them.
+enum class flow : std::uint8_t { fast, standard };
+
 // What authorizes a command: nothing (a SEND to a queue not secured yet),
 // or a key of the connection's.
 namespace authorization {
@@ -142,7 +149,8 @@ class duplex {
   friend auto snapshot_fields(D& d) {
     return std::tie(d.rcv_router_, d.rcv_id_, d.rcv_snd_id_, d.rcv_auth_, d.rcv_router_dh_, d.rcv_e2e_, d.rcv_server_dh_, d.rcv_their_e2e_,
                     d.snd_queue_, d.snd_their_dh_, d.snd_auth_, d.snd_e2e_, d.snd_key_, d.agent_version_, d.client_version_, d.ratchet_,
-                    d.snd_message_id_, d.rcv_message_id_, d.actions_, d.snd_previous_hash_, d.rcv_previous_hash_, d.connected_);
+                    d.snd_message_id_, d.rcv_message_id_, d.actions_, d.snd_previous_hash_, d.rcv_previous_hash_, d.connected_,
+                    d.flow_, d.awaiting_, d.got_hello_);
   }
 
  protected:
@@ -193,9 +201,11 @@ class duplex {
                    [&](const agent::agent_message::conn_info& ci) {
                      rcv_message_id_ = 1;
                      rcv_previous_hash_ = agent::message_hash(*plain);
-                     connected_ = true;
                      out.events.push_back(event::confirmed{ci.info});
-                     out.events.push_back(event::connected{});
+                     if (flow_ == flow::fast) {  // by the standard flow, HELLOs first
+                       connected_ = true;
+                       out.events.push_back(event::connected{});
+                     }
                    },
                    [&](const agent::agent_message::message& m) {
                      const bool in_sequence = m.header.id == rcv_message_id_ + 1 && m.header.previous_hash == rcv_previous_hash_;
@@ -205,7 +215,7 @@ class duplex {
                                                 [&](const agent::a_message::received& x) {
                                                   for (const auto& r : x.receipts) out.events.push_back(event::received{r.message_id});
                                                 },
-                                                [&](const agent::a_message::hello&) {},
+                                                [&](const agent::a_message::hello&) { got_hello_ = true; },
                                                 [&](const auto&) { out.events.push_back(event::other{*message}); }},
                                 m.body);
                    },
@@ -213,6 +223,26 @@ class duplex {
                *message);
   }
 
+  // The step's action awaited: its answer, and no other, moves the step on.
+  action& expect(output& out, action a) {
+    awaiting_ = a.id;
+    out.actions.push_back(std::move(a));
+    return out.actions.back();
+  }
+  // Our HELLO, the standard flow's: an agent message, numbered and hashed.
+  template <crypto::random_source R>
+  std::expected<void, std::string> send_hello(R& random, output& out) {
+    const std::uint64_t id = ++snd_message_id_;
+    bytes plain;
+    agent::put_agent_message(plain, agent::agent_message::message{{id, snd_previous_hash_}, agent::a_message::hello{}});
+    if (auto sent = send_agent_message(plain, random, out); !sent) return sent;
+    snd_previous_hash_ = agent::message_hash(plain);
+    return {};
+  }
+
+  connection::flow flow_ = flow::fast;
+  std::uint64_t awaiting_ = 0;
+  bool got_hello_ = false;
   // The queue received on: where, its ids, our keys for it, the router's key.
   smp::router rcv_router_;
   bytes rcv_id_, rcv_snd_id_;
@@ -238,13 +268,15 @@ class duplex {
 class joining : public detail::duplex {
  public:
   // An invitation joined: its queue, its parameters; our reply queue to be
-  // made on `reply_router`; `info` what the other side is told (a chat profile).
+  // made on `reply_router`; `info` what the other side is told (a chat
+  // profile). By the fast flow where the invitation's queue lets its sender
+  // secure it, or by the standard one where asked to (or where it does not).
   template <crypto::random_source R>
   static std::expected<std::pair<joining, output>, std::string> join(const agent::link::invitation& invitation, smp::router reply_router,
-                                                                     bytes info, R& random) {
+                                                                     bytes info, R& random, connection::flow how = flow::fast) {
     joining c;
     const auto& theirs_q = invitation.queues.front();
-    if (!agent::detail::sender_can_secure(theirs_q.address.mode)) return std::unexpected("the invitation's queue cannot be secured by its sender (no fast flow)");
+    c.flow_ = agent::detail::sender_can_secure(theirs_q.address.mode) ? how : flow::standard;
     c.snd_queue_ = agent::send_queue_address{theirs_q.address.router, theirs_q.address.sender_id};
     c.snd_their_dh_ = theirs_q.address.dh;
     c.rcv_router_ = std::move(reply_router);
@@ -267,10 +299,11 @@ class joining : public detail::duplex {
     c.ratchet_.emplace(ratchet::sending_ratchet(e2e_version, ratchet::current_version, invitation.e2e.key2, own_dh.priv, agreed->first, agreed->second));
     c.params_ = params;
     output out;
-    out.actions.push_back(c.act(c.rcv_router_, {},
-                                smp::command::create{c.rcv_auth_.pub, c.rcv_router_dh_.pub, std::nullopt, true,
-                                                     smp::queue_request_t(smp::queue_request::messaging{}), std::nullopt},
-                                authorization::signed_by{c.rcv_auth_.priv}));
+    // Our reply queue: one its sender may secure, where the fast flow goes on.
+    std::optional<smp::queue_request_t> request;
+    if (c.flow_ == flow::fast) request = smp::queue_request_t(smp::queue_request::messaging{});
+    c.expect(out, c.act(c.rcv_router_, {}, smp::command::create{c.rcv_auth_.pub, c.rcv_router_dh_.pub, std::nullopt, true, request, std::nullopt},
+                        authorization::signed_by{c.rcv_auth_.priv}));
     c.step_ = step::creating_reply;
     return std::pair{std::move(c), std::move(out)};
   }
@@ -280,39 +313,26 @@ class joining : public detail::duplex {
   output answered(std::uint64_t action_id, const smp::response_t& response, R& random) {
     output out;
     if (response.template get_if<smp::response::failed>()) return failed(out, "the router refused action " + std::to_string(action_id));
+    if (action_id != awaiting_) return out;  // an OK to a SEND or an ACK no step waits for
     switch (step_) {
       case step::creating_reply: {
         const auto* ids = response.template get_if<smp::response::queue_ids>();
         if (!ids) return failed(out, "no queue ids for the reply queue");
         rcv_id_ = ids->recipient_id, rcv_snd_id_ = ids->sender_id, rcv_server_dh_ = ids->server_dh;
-        out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::sender_secure{snd_auth_.pub}, authorization::signed_by{snd_auth_.priv}));
+        if (flow_ == flow::standard) return confirm(random, out);
+        expect(out, act(snd_queue_->router, snd_queue_->sender_id, smp::command::sender_secure{snd_auth_.pub}, authorization::signed_by{snd_auth_.priv}));
         step_ = step::securing_theirs;
         return out;
       }
-      case step::securing_theirs: {
-        // The confirmation: our reply queue and our info, through the ratchet.
-        const agent::queue_info reply{agent::current_client_version,
-                                      {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, agent::queue_mode_t(agent::queue_mode::messaging{})}};
-        bytes conn_info;
-        agent::put_agent_message(conn_info, agent::agent_message::conn_info_reply{{reply}, info_});
-        const auto encrypted = ratchet::encrypt(*ratchet_, conn_info, agent::conn_info_length(ratchet_->support_kem), random);
-        if (!encrypted) return failed(out, "the connection info could not be encrypted");
-        bytes envelope;
-        agent::put_envelope(envelope, agent::envelope::confirmation{agent_version_, params_, *encrypted});
-        const auto key = crypto::box_key_of(snd_their_dh_, snd_e2e_.priv);
-        if (!key) return failed(out, "the invitation's queue key refuses ours");
-        snd_key_ = *key;
-        const auto sealed = smp::e2e_confirmation(snd_key_, client_version_, snd_e2e_.pub, std::nullopt, envelope, random);
-        if (!sealed) return failed(out, "the confirmation could not be sealed");
-        // The connection info is our message 1, its hash what message 2 says came before.
-        snd_message_id_ = 1;
-        snd_previous_hash_ = agent::message_hash(conn_info);
-        out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::send{true, *sealed}, authorization::signed_by{snd_auth_.priv}));
-        step_ = step::confirming;
+      case step::securing_theirs:
+        return confirm(random, out);
+      case step::securing_ours:
+        // Our reply queue secured with the inviting side's key: our HELLO.
+        if (auto sent = send_hello(random, out); !sent) return failed(out, sent.error());
+        step_ = step::hello_sent;
         return out;
-      }
       default:
-        return out;  // an OK to a SEND or an ACK
+        return out;
     }
   }
 
@@ -322,7 +342,13 @@ class joining : public detail::duplex {
     output out;
     const auto e2e = opened(got, out);
     if (!e2e) return out;
-    const auto body = spl::visit(spl::overloaded{[](const smp::e2e::message& m) { return m.body; }, [](const smp::e2e::confirmation& c) { return c.body; }}, *e2e);
+    std::optional<smp::auth_key> their_sender_key;
+    const auto body = spl::visit(spl::overloaded{[](const smp::e2e::message& m) { return m.body; },
+                                                 [&](const smp::e2e::confirmation& c) {
+                                                   their_sender_key = c.sender_key;
+                                                   return c.body;
+                                                 }},
+                                 *e2e);
     const auto envelope = agent::envelope_of(body);
     if (!envelope) return failed(out, "an envelope that does not read");
     const auto encrypted = spl::visit(spl::overloaded{[](const agent::envelope::confirmation& c) { return std::optional(c.encrypted); },
@@ -331,11 +357,19 @@ class joining : public detail::duplex {
                                       *envelope);
     if (!encrypted) return failed(out, "an envelope this side does not take");
     agent_message_in(*encrypted, random, out);
+    if (flow_ == flow::standard && step_ == step::confirming && their_sender_key) {
+      // The inviting side's confirmation, with the key its SENDs will be
+      // signed by: our reply queue secured with it (KEY).
+      expect(out, act(rcv_router_, rcv_id_, smp::command::secure{*their_sender_key}, authorization::signed_by{rcv_auth_.priv}));
+      step_ = step::securing_ours;
+    } else if (flow_ == flow::standard && step_ == step::hello_sent && got_hello_) {
+      connected_ = true;
+      out.events.push_back(event::connected{});
+      step_ = step::done;
+    }
     return out;
   }
 
-
-  // The connection as bytes, to be kept (secret: its keys are in it), and back.
   [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
   template <std::ranges::input_range In>
   static std::expected<joining, quay::snapshot::error> restored(In&& from) {
@@ -351,7 +385,35 @@ class joining : public detail::duplex {
   }
 
  private:
-  enum class step { creating_reply, securing_theirs, confirming };
+  enum class step { creating_reply, securing_theirs, confirming, securing_ours, hello_sent, done };
+  // The confirmation: our reply queue and our info, through the ratchet --
+  // by the standard flow with our sender key beside it, the SEND unsigned.
+  template <crypto::random_source R>
+  output& confirm(R& random, output& out) {
+    std::optional<agent::queue_mode_t> mode;
+    if (flow_ == flow::fast) mode = agent::queue_mode_t(agent::queue_mode::messaging{});
+    const agent::queue_info reply{agent::current_client_version, {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, mode}};
+    bytes conn_info;
+    agent::put_agent_message(conn_info, agent::agent_message::conn_info_reply{{reply}, info_});
+    const auto encrypted = ratchet::encrypt(*ratchet_, conn_info, agent::conn_info_length(ratchet_->support_kem), random);
+    if (!encrypted) return failed(out, "the connection info could not be encrypted");
+    bytes envelope;
+    agent::put_envelope(envelope, agent::envelope::confirmation{agent_version_, params_, *encrypted});
+    const auto key = crypto::box_key_of(snd_their_dh_, snd_e2e_.priv);
+    if (!key) return failed(out, "the invitation's queue key refuses ours");
+    snd_key_ = *key;
+    std::optional<smp::auth_key> sender_key;
+    if (flow_ == flow::standard) sender_key = smp::auth_key(snd_auth_.pub);
+    const auto sealed = smp::e2e_confirmation(snd_key_, client_version_, snd_e2e_.pub, sender_key, envelope, random);
+    if (!sealed) return failed(out, "the confirmation could not be sealed");
+    // The connection info is our message 1, its hash what message 2 says came before.
+    snd_message_id_ = 1;
+    snd_previous_hash_ = agent::message_hash(conn_info);
+    out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::send{true, *sealed},
+                              flow_ == flow::fast ? authorization_t(authorization::signed_by{snd_auth_.priv}) : authorization_t(authorization::none{})));
+    step_ = step::confirming;
+    return out;
+  }
   bytes info_;
   ratchet::e2e_params params_;
   step step_ = step::creating_reply;
@@ -360,12 +422,14 @@ class joining : public detail::duplex {
 // The inviting side of a connection.
 class inviting : public detail::duplex {
  public:
-  // An invitation made: our queue on `router` (the sender may secure it),
-  // our ratchet's parameters -- a KEM key proposed where `post_quantum` --
+  // An invitation made: our queue on `router` -- one the joining side may
+  // secure itself by the fast flow, or that we secure by the standard one
+  // -- our ratchet's parameters, a KEM key proposed where `post_quantum`,
   // and `info`, what the other side is told once it joins.
   template <crypto::random_source R>
-  static std::pair<inviting, output> invite(smp::router router, bytes info, bool post_quantum, R& random) {
+  static std::pair<inviting, output> invite(smp::router router, bytes info, bool post_quantum, R& random, connection::flow how = flow::fast) {
     inviting c;
+    c.flow_ = how;
     c.rcv_router_ = std::move(router);
     c.info_ = std::move(info);
     c.rcv_auth_ = crypto::generate<curve::ed25519>(random);
@@ -378,10 +442,10 @@ class inviting : public detail::duplex {
     c.private_ = std::move(priv);
     c.post_quantum_ = post_quantum;
     output out;
-    out.actions.push_back(c.act(c.rcv_router_, {},
-                                smp::command::create{c.rcv_auth_.pub, c.rcv_router_dh_.pub, std::nullopt, true,
-                                                     smp::queue_request_t(smp::queue_request::messaging{}), std::nullopt},
-                                authorization::signed_by{c.rcv_auth_.priv}));
+    std::optional<smp::queue_request_t> request;
+    if (how == flow::fast) request = smp::queue_request_t(smp::queue_request::messaging{});
+    c.expect(out, c.act(c.rcv_router_, {}, smp::command::create{c.rcv_auth_.pub, c.rcv_router_dh_.pub, std::nullopt, true, request, std::nullopt},
+                        authorization::signed_by{c.rcv_auth_.priv}));
     return {std::move(c), std::move(out)};
   }
 
@@ -391,9 +455,10 @@ class inviting : public detail::duplex {
   // owner accepts and joins it (a chat x.info).
   template <crypto::random_source R>
   static std::expected<std::pair<inviting, output>, std::string> invite_through(const agent::link::contact& address, smp::router router,
-                                                                                bytes request_info, bytes info, bool post_quantum, R& random) {
+                                                                                bytes request_info, bytes info, bool post_quantum, R& random,
+                                                                                connection::flow how = flow::fast) {
     if (address.queues.empty()) return std::unexpected("an address without a queue");
-    auto [c, out] = invite(std::move(router), std::move(info), post_quantum, random);
+    auto [c, out] = invite(std::move(router), std::move(info), post_quantum, random, how);
     c.through_ = address;
     c.request_info_ = std::move(request_info);
     return std::pair{std::move(c), std::move(out)};
@@ -404,14 +469,16 @@ class inviting : public detail::duplex {
   output answered(std::uint64_t action_id, const smp::response_t& response, R& random) {
     output out;
     if (response.template get_if<smp::response::failed>()) return failed(out, "the router refused action " + std::to_string(action_id));
+    if (action_id != awaiting_) return out;  // an OK to a SEND or an ACK no step waits for
     switch (step_) {
       case step::creating: {
         const auto* ids = response.template get_if<smp::response::queue_ids>();
         if (!ids) return failed(out, "no queue ids for our queue");
         rcv_id_ = ids->recipient_id, rcv_snd_id_ = ids->sender_id, rcv_server_dh_ = ids->server_dh;
+        std::optional<agent::queue_mode_t> mode;
+        if (flow_ == flow::fast) mode = agent::queue_mode_t(agent::queue_mode::messaging{});
         agent::link::invitation link;
-        link.queues.push_back(agent::queue_uri{{1, agent::current_client_version},
-                                               {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, agent::queue_mode_t(agent::queue_mode::messaging{})}});
+        link.queues.push_back(agent::queue_uri{{1, agent::current_client_version}, {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, mode}});
         link.e2e = agent::e2e_params_uri{{ratchet::kdf_x3dh_version, ratchet::current_version}, params_.key1, params_.key2, std::nullopt};
         if (params_.kem) link.e2e.kem_key = params_.kem->template get_if<ratchet::kem_params::proposed>()->key;
         const auto text = agent::text_of(agent::link_t(link));
@@ -436,24 +503,35 @@ class inviting : public detail::duplex {
         }
         return out;
       }
-      case step::securing_theirs: {
-        // Our confirmation: our info, through the ratchet, to their reply queue.
+      case step::securing: {
+        // Our confirmation: our info, through the ratchet, to their reply
+        // queue -- by the standard flow with our sender key, unsigned.
         bytes conn_info;
         agent::put_agent_message(conn_info, agent::agent_message::conn_info{info_});
         const auto encrypted = ratchet::encrypt(*ratchet_, conn_info, agent::conn_info_length(ratchet_->support_kem), random);
         if (!encrypted) return failed(out, "the connection info could not be encrypted");
         bytes envelope;
         agent::put_envelope(envelope, agent::envelope::confirmation{agent_version_, std::nullopt, *encrypted});
-        const auto sealed = smp::e2e_confirmation(snd_key_, client_version_, snd_e2e_.pub, std::nullopt, envelope, random);
+        std::optional<smp::auth_key> sender_key;
+        if (flow_ == flow::standard) sender_key = smp::auth_key(snd_auth_.pub);
+        const auto sealed = smp::e2e_confirmation(snd_key_, client_version_, snd_e2e_.pub, sender_key, envelope, random);
         if (!sealed) return failed(out, "the confirmation could not be sealed");
         snd_message_id_ = 1;
         snd_previous_hash_ = agent::message_hash(conn_info);
-        out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::send{true, *sealed}, authorization::signed_by{snd_auth_.priv}));
+        expect(out, act(snd_queue_->router, snd_queue_->sender_id, smp::command::send{true, *sealed},
+                        flow_ == flow::fast ? authorization_t(authorization::signed_by{snd_auth_.priv}) : authorization_t(authorization::none{})));
         step_ = step::confirming;
         return out;
       }
       case step::confirming:
-        // Our confirmation taken by the router: by the fast flow, connected.
+        // Our confirmation taken by the router: by the fast flow, connected;
+        // by the standard one, the joining side's HELLO awaited.
+        if (flow_ == flow::standard) {
+          step_ = step::awaiting_hello;
+          return out;
+        }
+        [[fallthrough]];
+      case step::hello_sent:
         connected_ = true;
         out.events.push_back(event::connected{});
         step_ = step::done;
@@ -474,6 +552,8 @@ class inviting : public detail::duplex {
       const auto envelope = agent::envelope_of(conf->body);
       const auto* c = envelope ? envelope->template get_if<agent::envelope::confirmation>() : nullptr;
       if (!c || !c->e2e) return failed(out, "a confirmation without the joining side's ratchet parameters");
+      if (flow_ == flow::standard && !conf->sender_key) return failed(out, "a confirmation without the key to secure our queue with");
+      their_sender_key_ = conf->sender_key;
       // The ratchet, on its parameters.
       const auto agreed = ratchet::x3dh_receiving(private_, *c->e2e);
       if (!agreed) return failed(out, "no ratchet agreement with the joining side's keys");
@@ -489,7 +569,7 @@ class inviting : public detail::duplex {
       rcv_message_id_ = 1;
       rcv_previous_hash_ = agent::message_hash(*plain);
       const auto& q = reply->queues.front();
-      if (!agent::detail::sender_can_secure(q.address.mode)) return failed(out, "its reply queue cannot be secured by us (no fast flow)");
+      if (flow_ == flow::fast && !agent::detail::sender_can_secure(q.address.mode)) return failed(out, "its reply queue cannot be secured by us (no fast flow)");
       snd_queue_ = agent::send_queue_address{q.address.router, q.address.sender_id};
       snd_their_dh_ = q.address.dh;
       client_version_ = std::min<std::uint16_t>(q.client_version, agent::current_client_version);
@@ -506,21 +586,29 @@ class inviting : public detail::duplex {
     const auto* env = envelope ? envelope->template get_if<agent::envelope::message>() : nullptr;
     if (!env) return failed(out, "an envelope this side does not take");
     agent_message_in(env->encrypted, random, out);
+    if (step_ == step::awaiting_hello && got_hello_) {
+      // The joining side's HELLO: ours back, and connected once it is taken.
+      if (auto sent = send_hello(random, out); !sent) return failed(out, sent.error());
+      awaiting_ = out.actions.back().id;
+      step_ = step::hello_sent;
+    }
     return out;
   }
 
-  // The joining side allowed: its reply queue secured (SKEY), then our
-  // confirmation sent (answered()).
+  // The joining side allowed: by the fast flow its reply queue secured
+  // (SKEY), by the standard one our queue secured with its key (KEY); then
+  // our confirmation sent (answered()).
   output allow() {
     output out;
     if (step_ != step::confirmed) return failed(out, "nothing to allow");
-    out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::sender_secure{snd_auth_.pub}, authorization::signed_by{snd_auth_.priv}));
-    step_ = step::securing_theirs;
+    if (flow_ == flow::fast)
+      expect(out, act(snd_queue_->router, snd_queue_->sender_id, smp::command::sender_secure{snd_auth_.pub}, authorization::signed_by{snd_auth_.priv}));
+    else
+      expect(out, act(rcv_router_, rcv_id_, smp::command::secure{*their_sender_key_}, authorization::signed_by{rcv_auth_.priv}));
+    step_ = step::securing;
     return out;
   }
 
-
-  // The connection as bytes, to be kept (secret: its keys are in it), and back.
   [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
   template <std::ranges::input_range In>
   static std::expected<inviting, quay::snapshot::error> restored(In&& from) {
@@ -532,17 +620,19 @@ class inviting : public detail::duplex {
     requires std::same_as<std::remove_const_t<D>, inviting>
   friend auto snapshot_fields(D& d) {
     using base = std::conditional_t<std::is_const_v<D>, const detail::duplex, detail::duplex>;
-    return std::tuple_cat(snapshot_fields(static_cast<base&>(d)), std::tie(d.info_, d.params_, d.private_, d.post_quantum_, d.step_));
+    return std::tuple_cat(snapshot_fields(static_cast<base&>(d)),
+                          std::tie(d.info_, d.params_, d.private_, d.post_quantum_, d.their_sender_key_, d.step_));
   }
 
  private:
-  enum class step { creating, invited, confirmed, securing_theirs, confirming, done };
+  enum class step { creating, invited, confirmed, securing, confirming, awaiting_hello, hello_sent, done };
   std::optional<agent::link::contact> through_;  // until the contact request is sent
   bytes request_info_;
   bytes info_;
   ratchet::e2e_params params_;
   ratchet::e2e_private private_;
   bool post_quantum_ = true;
+  std::optional<smp::auth_key> their_sender_key_;  // the standard flow's: what our queue is secured with
   step step_ = step::creating;
 };
 

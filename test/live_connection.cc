@@ -23,6 +23,12 @@ import quay.chat;
 
 using namespace quay;
 
+// The flow asked for: QUAY_FLOW=standard, or the fast one.
+connection::flow flow_asked() {
+  const char* asked = std::getenv("QUAY_FLOW");
+  return asked && std::string_view(asked) == "standard" ? connection::flow::standard : connection::flow::fast;
+}
+
 namespace {
 int fd = -1;
 
@@ -136,7 +142,7 @@ int main(int, char** argv) {
     send_all(*smp::client_hello(agreed, router.identity));
 
     const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay state machine","fullName":""}}})";
-    auto joined = connection::joining::join(inv, router, bytes(profile.begin(), profile.end()), rng);
+    auto joined = connection::joining::join(inv, router, bytes(profile.begin(), profile.end()), rng, flow_asked());
     if (!joined) throw std::runtime_error(joined.error());
     auto& [conn, first] = *joined;
     bool is_connected = false, sent = false;

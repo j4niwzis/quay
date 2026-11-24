@@ -26,6 +26,12 @@ import quay.chat;
 
 using namespace quay;
 
+// The flow asked for: QUAY_FLOW=standard, or the fast one.
+connection::flow flow_asked() {
+  const char* asked = std::getenv("QUAY_FLOW");
+  return asked && std::string_view(asked) == "standard" ? connection::flow::standard : connection::flow::fast;
+}
+
 namespace {
 int fd = -1;
 
@@ -158,12 +164,12 @@ int main(int, char** argv) {
     const std::string request = R"({"v":"1-22","event":"x.contact","params":{"profile":{"displayName":"quay inviting","fullName":""}}})";
     auto made = spl::visit(spl::overloaded{[&](const agent::link::invitation&) {
                                              return std::expected<std::pair<connection::inviting, connection::output>, std::string>(
-                                                 connection::inviting::invite(router, bytes(profile.begin(), profile.end()), true, rng));
+                                                 connection::inviting::invite(router, bytes(profile.begin(), profile.end()), true, rng, flow_asked()));
                                            },
                                            [&](const agent::link::contact& address) {
                                              std::println("through the CLI's contact address");
                                              return connection::inviting::invite_through(address, router, bytes(request.begin(), request.end()),
-                                                                                         bytes(profile.begin(), profile.end()), true, rng);
+                                                                                         bytes(profile.begin(), profile.end()), true, rng, flow_asked());
                                            }},
                            *link);
     if (!made) throw std::runtime_error(made.error());
