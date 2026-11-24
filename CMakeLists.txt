@@ -166,22 +166,15 @@ if(QUAY_TESTS)
   endforeach()
   # Against a real router (CI runs smp-server; the tests reach it by quay.tls):
   # QUAY_SMP_ADDRESS, QUAY_SMP_FINGERPRINT.
-  # The parsers fuzzed: with libFuzzer (QUAY_FUZZ) or, without it, a driver of quay's own.
-  option(QUAY_FUZZ "Build the parsers' fuzzer with libFuzzer" OFF)
-  if(QUAY_FUZZ)
-    add_executable(quay-fuzz test/fuzz_parsers.cc)
-    target_compile_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
-    target_link_options(quay-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
-    # libFuzzer's runtime is built on libstdc++, quay on libc++: both linked
-    # -- libstdc++ kept though named before the runtime that needs it (the
-    # linker's --as-needed would drop it).
-    target_link_libraries(quay-fuzz PRIVATE quay)
-    target_link_options(quay-fuzz PRIVATE -Wl,--push-state,--no-as-needed -lstdc++ -Wl,--pop-state)
-  else()
-    add_executable(quay-fuzz test/fuzz_driver.cc)
-    target_compile_definitions(quay-fuzz PRIVATE QUAY_FUZZ_LOCAL)
-    target_include_directories(quay-fuzz PRIVATE test)
-    target_link_libraries(quay-fuzz PRIVATE quay)
+  # The parsers fuzzed by a driver of quay's own (random inputs and mutated
+  # seeds); with QUAY_FUZZ the whole build is meant to be instrumented
+  # (ASan, UBSan: the fuzz workflow), and the run is not a ctest.
+  option(QUAY_FUZZ "The fuzz driver for a sanitized build, run by hand" OFF)
+  add_executable(quay-fuzz test/fuzz_driver.cc)
+  target_compile_definitions(quay-fuzz PRIVATE QUAY_FUZZ_LOCAL)
+  target_include_directories(quay-fuzz PRIVATE test)
+  target_link_libraries(quay-fuzz PRIVATE quay)
+  if(NOT QUAY_FUZZ)
     add_test(NAME fuzz COMMAND quay-fuzz 60 ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/chat.json ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/forward.json
              ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/invite.json ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/pkey.txt ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/sids.txt
              ${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz_seeds/hpack.bin)

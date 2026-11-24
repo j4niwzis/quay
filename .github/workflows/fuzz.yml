@@ -1,7 +1,9 @@
 name: fuzz
 
-# quay's parsers under libFuzzer, with AddressSanitizer and
-# UndefinedBehaviorSanitizer over the whole of quay (test/fuzz_parsers.cc).
+# quay's parsers fuzzed with AddressSanitizer and UndefinedBehaviorSanitizer
+# over the whole of quay (test/fuzz_parsers.cc, fed by test/fuzz_driver.cc:
+# libFuzzer's runtime is built on libstdc++, quay on libc++, and they would
+# not link together).
 on:
   push:
     branches: [main]
@@ -46,18 +48,16 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ -DCMAKE_C_COMPILER=/usr/lib/llvm-23/bin/clang \
-            -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fsanitize=fuzzer-no-link -fno-sanitize-recover=all" \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fno-sanitize-recover=all" \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
             -DQUAY_FUZZ=ON
           cmake --build build --target quay-fuzz
       - name: fuzz, five minutes
         run: |
-          mkdir -p corpus
-          cp test/fuzz_seeds/* corpus/
-          ./build/quay-fuzz -max_total_time=300 -timeout=10 -rss_limit_mb=4096 corpus
+          ./build/quay-fuzz 300 test/fuzz_seeds/*
       - name: the crash, if one
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: crash
-          path: crash-*
+          path: fuzz-crash.bin
