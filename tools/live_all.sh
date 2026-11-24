@@ -1,4 +1,4 @@
-# quay's live tests against smp-server and simplex-chat's CLI, through the OpenSSL relay (127.0.0.1:15223).
+# quay's live tests against smp-server and simplex-chat's CLI, by quay.tls (127.0.0.1:15223).
 export LD_LIBRARY_PATH=/data/work/llvm/usr/lib/x86_64-linux-gnu:/data/work/llvm/usr/lib/llvm-23/lib
 Q=/data/work/chat_-1003343718758/w/quay; D=/data/work/chat_-1003343718758/w/dl/chat
 B=/data/work/chat_-1003343718758/w/quay-build; CB=/data/work/chat_-1003343718758/w/cairn-build
