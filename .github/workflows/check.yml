@@ -78,12 +78,28 @@ jobs:
           digest=$({ /usr/local/bin/clang++ --version; sha256sum /lib/share/libc++/v1/std.cppm; } | sha256sum | cut -c1-16)
           echo "COMPILER_BUILD=$digest" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
+        id: cache
         with:
           path: |
             build
             .cache/cpm
           key: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-${{ github.sha }}
           restore-keys: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-
+
+      # A restored build may come from another commit's run that finished
+      # after this commit -- its objects newer than files this commit
+      # changed: what differs from that commit is stamped with now, so it
+      # is rebuilt whatever the times say.
+      - name: files changed since the restored build
+        if: steps.cache.outputs.cache-matched-key != ''
+        run: |
+          base="${{ steps.cache.outputs.cache-matched-key }}"
+          base="${base##*-}"
+          if git cat-file -e "$base^{commit}" 2>/dev/null; then
+            git diff --name-only -z "$base" HEAD | xargs -0 -r touch
+          else
+            git ls-files -z | xargs -0 touch
+          fi
 
       - name: build
         run: |
