@@ -1,0 +1,63 @@
+name: fuzz
+
+# quay's parsers under libFuzzer, with AddressSanitizer and
+# UndefinedBehaviorSanitizer over the whole of quay (test/fuzz_parsers.cc).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang, libc++ and the sanitizers' runtimes
+        run: |
+          sudo apt-get update || true
+          sudo apt-get install -y ninja-build lsb-release software-properties-common gnupg curl
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 23
+          sudo apt-get install -y libc++-23-dev libc++abi-23-dev libclang-rt-23-dev
+      - name: cmake
+        run: |
+          version=4.4.3
+          curl -sSL -o cmake.tar.gz "https://github.com/Kitware/CMake/releases/download/v${version}/cmake-${version}-linux-x86_64.tar.gz"
+          sudo tar xzf cmake.tar.gz -C /opt
+          echo "/opt/cmake-${version}-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: where import std is read from
+        run: |
+          sudo mkdir -p /lib/share/libc++
+          sudo ln -sfn /usr/lib/llvm-23/share/libc++/v1 /lib/share/libc++/v1
+          sudo ln -sf /usr/lib/llvm-23/bin/clang++ /usr/local/bin/clang++
+      - uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: fuzz-cpm-${{ hashFiles('CMakeLists.txt') }}
+      - name: build, instrumented throughout
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ -DCMAKE_C_COMPILER=/usr/lib/llvm-23/bin/clang \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fsanitize=fuzzer-no-link -fno-sanitize-recover=all" \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
+            -DQUAY_FUZZ=ON
+          cmake --build build --target quay-fuzz
+      - name: fuzz, five minutes
+        run: |
+          mkdir -p corpus
+          cp test/fuzz_seeds/* corpus/
+          ./build/quay-fuzz -max_total_time=300 -timeout=10 -rss_limit_mb=4096 corpus
+      - name: the crash, if one
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash
+          path: crash-*
