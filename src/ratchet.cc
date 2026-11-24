@@ -312,6 +312,13 @@ struct state {
     return out;
   }
 };
+// What a snapshot of a state holds (quay.snapshot): all of it, in this order.
+template <class S>
+  requires std::same_as<std::remove_const_t<S>, state>
+auto snapshot_fields(S& s) {
+  return std::tie(s.current, s.max_supported, s.associated, s.dh_own, s.kem, s.support_kem, s.enable_kem, s.send_kem, s.receive_kem, s.root,
+                  s.send, s.receive, s.ns, s.nr, s.pn, s.next_send_header, s.next_receive_header, s.skipped);
+}
 
 namespace detail {
 // A DH that fails (a low-order point) is refused here, as the initial

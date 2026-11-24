@@ -157,6 +157,12 @@ int main(int, char** argv) {
         }
       }
       if (is_connected && !sent) {
+        // As a program restarted would: the connection saved, and taken back from the bytes alone.
+        const auto saved = conn.saved();
+        auto back = connection::joining::restored(saved);
+        if (!back) throw std::runtime_error("the saved connection did not restore");
+        conn = std::move(*back);
+        std::println("connection saved ({} bytes) and restored", saved.size());
         // Long enough to go compressed: a zstd batch of one, as simplex-chat sends.
         const auto text = "hello from quay.chat, the joining side, compressed: " + std::string(300, 'q');
         const auto body = chat::body_of(chat::message_of(chat::event::message_new{chat::text_content(text)}, "cXVheWNoYXQ="));

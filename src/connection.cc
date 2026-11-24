@@ -15,7 +15,9 @@
 // as the agent numbers and hashes them.
 //
 // A connection is moved, not copied (its ratchet's keys and IVs must not be
-// used twice); the caller keeps it between calls.
+// used twice); the caller keeps it between calls -- and between runs, as
+// the bytes saved() gives and restored() takes back (quay.snapshot): saved
+// after every call that changed it, before what it asked for is sent.
 export module quay.connection;
 
 import std;
@@ -26,6 +28,7 @@ import quay.smp;
 import quay.ratchet;
 import quay.agent;
 import quay.session;
+import quay.snapshot;
 
 export namespace quay::connection {
 
@@ -114,6 +117,15 @@ class duplex {
     if (auto sent = send_agent_message(plain, random, out); !sent) return std::unexpected(sent.error());
     snd_previous_hash_ = agent::message_hash(plain);
     return std::pair{id, std::move(out)};
+  }
+
+  // What a snapshot of it holds: all of it.
+  template <class D>
+    requires std::same_as<std::remove_const_t<D>, duplex>
+  friend auto snapshot_fields(D& d) {
+    return std::tie(d.rcv_router_, d.rcv_id_, d.rcv_snd_id_, d.rcv_auth_, d.rcv_router_dh_, d.rcv_e2e_, d.rcv_server_dh_, d.rcv_their_e2e_,
+                    d.snd_queue_, d.snd_their_dh_, d.snd_auth_, d.snd_e2e_, d.snd_key_, d.agent_version_, d.client_version_, d.ratchet_,
+                    d.snd_message_id_, d.rcv_message_id_, d.actions_, d.snd_previous_hash_, d.rcv_previous_hash_, d.connected_);
   }
 
  protected:
@@ -305,6 +317,22 @@ class joining : public detail::duplex {
     return out;
   }
 
+
+  // The connection as bytes, to be kept (secret: its keys are in it), and back.
+  [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
+  template <std::ranges::input_range In>
+  static std::expected<joining, quay::snapshot::error> restored(In&& from) {
+    joining c;
+    if (auto r = quay::snapshot::restore(std::forward<In>(from), c); !r) return std::unexpected(r.error());
+    return c;
+  }
+  template <class D>
+    requires std::same_as<std::remove_const_t<D>, joining>
+  friend auto snapshot_fields(D& d) {
+    using base = std::conditional_t<std::is_const_v<D>, const detail::duplex, detail::duplex>;
+    return std::tuple_cat(snapshot_fields(static_cast<base&>(d)), std::tie(d.info_, d.params_, d.step_));
+  }
+
  private:
   enum class step { creating_reply, securing_theirs, confirming };
   bytes info_;
@@ -440,6 +468,22 @@ class inviting : public detail::duplex {
     out.actions.push_back(act(snd_queue_->router, snd_queue_->sender_id, smp::command::sender_secure{snd_auth_.pub}, authorization::signed_by{snd_auth_.priv}));
     step_ = step::securing_theirs;
     return out;
+  }
+
+
+  // The connection as bytes, to be kept (secret: its keys are in it), and back.
+  [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
+  template <std::ranges::input_range In>
+  static std::expected<inviting, quay::snapshot::error> restored(In&& from) {
+    inviting c;
+    if (auto r = quay::snapshot::restore(std::forward<In>(from), c); !r) return std::unexpected(r.error());
+    return c;
+  }
+  template <class D>
+    requires std::same_as<std::remove_const_t<D>, inviting>
+  friend auto snapshot_fields(D& d) {
+    using base = std::conditional_t<std::is_const_v<D>, const detail::duplex, detail::duplex>;
+    return std::tuple_cat(snapshot_fields(static_cast<base&>(d)), std::tie(d.info_, d.params_, d.private_, d.post_quantum_, d.step_));
   }
 
  private:

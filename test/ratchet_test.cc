@@ -11,6 +11,7 @@ import quay.crypto;
 import quay.ratchet;
 import quay.smp;
 import quay.agent;
+import quay.snapshot;
 
 #include "gtest/gtest-macros.h"
 
@@ -153,4 +154,36 @@ TEST(Ratchet, SimplexChatSessionReplayed) {
   ASSERT_TRUE(opened.has_value());
   EXPECT_TRUE(*opened == simplex_their_conn_info_plain);
   EXPECT_TRUE(rc.receive_kem);  // its step was augmented with the KEM
+}
+
+TEST(Ratchet, SavedAndRestored) {
+  counting random;
+  auto [alice, bob] = connect(true, random);
+  std::vector<bytes> sent;
+  for (int i = 0; i < 4; ++i) sent.push_back(*encrypt(alice, text("m" + std::to_string(i)), 13618, random));
+  EXPECT_TRUE(*decrypt(bob, sent[3], random) == text("m3"));  // 0..2 skipped
+  ASSERT_EQ(bob.skipped.size(), 1u);
+  // Both saved and restored: the copies go on as the originals would.
+  const auto bob_saved = snapshot::of(bob), alice_saved = snapshot::of(alice);
+  state bob2, alice2;
+  ASSERT_TRUE(snapshot::restore(bob_saved, bob2).has_value());
+  ASSERT_TRUE(snapshot::restore(alice_saved, alice2).has_value());
+  EXPECT_TRUE(snapshot::of(bob2) == bob_saved);
+  EXPECT_TRUE(*decrypt(bob2, sent[1], random) == text("m1"));
+  const auto reply = encrypt(bob2, text("restored bob"), 13618, random);
+  EXPECT_TRUE(*decrypt(alice2, *reply, random) == text("restored bob"));
+  const auto next = encrypt(alice2, text("restored alice"), 13618, random);
+  EXPECT_TRUE(*decrypt(bob2, *next, random) == text("restored alice"));
+  EXPECT_TRUE(*decrypt(bob2, sent[0], random) == text("m0"));
+  EXPECT_TRUE(alice2.kem && bob2.kem && bob2.send_kem);
+  // Not a snapshot, another layout, cut short, with more after: refused.
+  state none;
+  EXPECT_TRUE(!snapshot::restore(text("nope"), none).has_value());
+  auto other = bob_saved;
+  other[4] = 9;
+  EXPECT_TRUE(!snapshot::restore(other, none).has_value());
+  EXPECT_TRUE(!snapshot::restore(std::span(bob_saved).first(bob_saved.size() - 1), none).has_value());
+  auto longer = bob_saved;
+  longer.push_back(0);
+  EXPECT_TRUE(!snapshot::restore(longer, none).has_value());
 }
