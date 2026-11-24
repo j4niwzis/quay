@@ -25,6 +25,8 @@ import quay.client;
 
 using namespace quay;
 
+#include "live_client_io.h"
+
 namespace {
 std::string random_id(crypto::system_random& rng, std::size_t n) {
   bytes id(n);
@@ -45,15 +47,7 @@ int main(int, char** argv) {
     if (!link) throw std::runtime_error("not a link");
     const auto router = spl::visit([](const auto& l) { return l.queues.front().address.router; }, *link);
     crypto::system_random rng;
-    sockaddr_in where{};
-    where.sin_family = AF_INET;
-    where.sin_port = htons(router.port.value_or(5223));
-    inet_pton(AF_INET, router.hosts.front().c_str(), &where.sin_addr);
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    timeval wait{30, 0};
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
-    // The one place a C API asks for its own pointer type: sockaddr*.
-    if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), sizeof where) != 0) throw std::runtime_error("no connection");
+    const int fd = connect_to(router);
 
     client::router_session session(router);
     const std::string name = std::format("quay{}", ::getpid());
@@ -106,15 +100,7 @@ int main(int, char** argv) {
                    e);
     };
     for (int i = 0; i < 160 && !(said && heard); ++i) {
-      for (auto out = session.take_outgoing(); !out.empty();) {
-        const auto n = ::send(fd, out.data(), out.size(), 0);
-        if (n <= 0) throw std::runtime_error("send failed");
-        out.erase(out.begin(), out.begin() + n);
-      }
-      std::array<byte, 16384> buffer{};
-      const auto n = ::recv(fd, buffer.data(), buffer.size(), 0);
-      if (n <= 0) throw std::runtime_error(n == 0 ? "closed" : "quiet for 30 seconds");
-      session.received(std::span<const byte>(buffer.data(), static_cast<std::size_t>(n)));
+      pump(fd, session);
       for (const auto& in : session.take_incoming())
         spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
@@ -134,11 +120,7 @@ int main(int, char** argv) {
         std::println("our group message sent");
       }
     }
-    for (auto out = session.take_outgoing(); !out.empty();) {
-      const auto n = ::send(fd, out.data(), out.size(), 0);
-      if (n <= 0) break;
-      out.erase(out.begin(), out.begin() + n);
-    }
+    flush(fd, session);
     ::sleep(2);
     std::println("live group link host: {}", said && heard ? "passed" : "FAILED");
     return said && heard ? 0 : 1;
