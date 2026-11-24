@@ -216,6 +216,8 @@ if(QUAY_TESTS)
     add_executable(quay-live_client test/live_client.cc)
     target_link_libraries(quay-live_client PRIVATE quay)
     add_test(NAME live_client COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_invite.sh $<TARGET_FILE:quay-live_client>)
+    add_test(NAME live_client_proxied COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_invite.sh $<TARGET_FILE:quay-live_client>)
+    set_tests_properties(live_client_proxied PROPERTIES ENVIRONMENT QUAY_PROXY=1)
     # quay's own address: the CLI's contact request, accepted.
     add_executable(quay-live_address test/live_address.cc)
     target_link_libraries(quay-live_address PRIVATE quay)

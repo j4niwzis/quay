@@ -18,7 +18,7 @@ comes is fed to it, and the caller's transport and control flow carry it.
 | `quay.ratchet` | the post-quantum double ratchet (X448, sntrup761 KEM), as simplexmq's |
 | `quay.agent` | the agent's messages, envelopes, queue addresses and links (`simplex:/invitation`, `simplex:/contact`) |
 | `quay.connection` | duplex connections as state machines: both sides of an invitation by the fast (SKEY) and the standard flow, contact addresses both ways, messages and receipts, queue switching both ways, re-subscription, save and restore |
-| `quay.client` | one session with one router for any number of connections: socket bytes in and out, answers and deliveries routed back |
+| `quay.client` | one session with one router for any number of connections: socket bytes in and out, answers and deliveries routed back; actions for other routers sent through it as a proxy |
 | `quay.hpack`, `quay.http2` | HTTP/2 for XFTP, sans-IO: HPACK with its tables read at compile time from RFC 7541's text, frames, streams, flow control |
 | `quay.xftp` | XFTP: a session with a files router (the handshake, the router authenticated), FNEW/FADD/FPUT/FGET/FACK/FDEL, chunks opened |
 | `quay.xfile` | files over XFTP: a file sealed whole and cut into chunks, as simplexmq's xftp does, and file descriptions read and written |
@@ -31,7 +31,7 @@ and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, files both ways over XFTP, save/restore, re-subscription and queue switching
 both ways -- over quay's own TLS.
 
-Not yet: group roles and moderation; private routing wired into quay.client (its primitives are in quay.session).
+Not yet: group roles and moderation.
 
 ## Keeping a connection: save before you send
 

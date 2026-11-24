@@ -5,6 +5,7 @@
 // -- with a plain blocking socket around it; then a chat message sent and
 // its receipt back. The router is the one the CLI's invitation names; our
 // address is written out for the CLI to connect to (tools/live_cli_invite.sh).
+// With QUAY_PROXY, every SEND goes through the router as a proxy.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -65,8 +66,17 @@ int main(int, char** argv) {
     std::optional<connection::joining> contact;
     bool connected = false, sent = false, receipt = false;
 
+    // With QUAY_PROXY, what we send to the contact (SEND) goes through our router as a proxy.
+    const bool via_proxy = std::getenv("QUAY_PROXY") != nullptr;
     const auto handle = [&](std::uint64_t tag, const connection::output& out) {
-      session.submit(tag, out, rng);
+      for (const auto& a : out.actions) {
+        if (via_proxy && a.command.template get_if<smp::command::send>()) {
+          std::println("  a SEND through the proxy");
+          session.submit_via_proxy(tag, a, a.router, rng);
+        } else {
+          session.submit(tag, a, rng);
+        }
+      }
       for (const auto& e : out.events)
         spl::visit(spl::overloaded{[&](const connection::event::address& a) {
                                      std::println("our address: {}...", a.link.substr(0, 50));

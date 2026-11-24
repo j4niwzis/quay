@@ -7,6 +7,10 @@
 // comes back is said with it: the answer to an action by its tag and id,
 // a delivery by the queue it is for (connection::queue_id()).
 //
+// Actions for queues on other routers may go through this one as a proxy
+// (submit_via_proxy: private message routing), the destination never
+// seeing the program's address.
+//
 // What it does not do is the socket itself: the program connects to the
 // router's host and port, writes take_outgoing(), and feeds what it reads
 // to received() -- with whatever I/O it likes.
@@ -68,6 +72,23 @@ class router_session {
     for (const auto& a : out.actions) submit(tag, a, random);
   }
 
+  // An action for a queue on `destination`, sent through this router as a
+  // proxy (private message routing): the destination's session asked for
+  // once (PRXY) and checked (session::verify_relayed), then each action
+  // sealed for it (session::proxy_command) and forwarded (PFWD); its answer
+  // comes back as any other, by tag and id.
+  template <crypto::random_source R>
+  void submit_via_proxy(std::uint64_t tag, const connection::action& a, const smp::router& destination, R& random) {
+    auto& relay = relays_[destination.identity];
+    relay.router = destination;
+    relay.waiting.push_back({tag, a});
+    if (!relay.asked) {
+      relay.asked = true;
+      submit_raw(smp::command::proxy_session{destination, std::nullopt}, {}, random, [this, id = destination.identity](const smp::corr_id& c) { prxy_[c] = id; });
+    }
+    flush_relay(relay, random);
+  }
+
   // Bytes read from the socket.
   void received(std::span<const byte> data) {
     if (failed_) return;
@@ -85,6 +106,56 @@ class router_session {
   // What to write to the socket, and what came of what was read, drained.
   [[nodiscard]] bytes take_outgoing() { return std::exchange(outgoing_, {}); }
   [[nodiscard]] std::vector<incoming_t> take_incoming() { return std::exchange(incoming_, {}); }
+
+ private:
+  struct relay {
+    smp::router router;
+    bool asked = false;
+    std::optional<session::verified> destination;
+    bytes session_id;  // the proxy's session with it
+    std::vector<std::pair<std::uint64_t, connection::action>> waiting;
+  };
+  struct in_flight {
+    std::uint64_t tag = 0, action_id = 0;
+    session::proxied sealed;
+    std::uint16_t version = 0;
+  };
+  // A command of this session's own (no connection's action), its correlation id told.
+  template <crypto::random_source R, class Told>
+  void submit_raw(const smp::command_t& command, bytes entity, R& random, Told&& told) {
+    smp::corr_id c{};
+    random(std::span<byte>(c));
+    told(c);
+    bytes body;
+    smp::put_command(body, command);
+    raw_.push_back(smp::transmission{{}, c, std::move(entity), std::move(body)});
+    send_raw();
+  }
+  void send_raw() {
+    if (!verified_) return;
+    for (const auto& t : std::exchange(raw_, {})) {
+      const auto block = smp::block_of(std::span(&t, 1), verified_->version());
+      if (!block) return fail("a command too large for a block");
+      if (auto sent = tls_.send(*block); !sent) return fail(sent.error());
+      flush();
+    }
+  }
+  template <crypto::random_source R>
+  void flush_relay(relay& r, R& random) {
+    if (!r.destination) return;
+    for (auto& [tag, a] : std::exchange(r.waiting, {})) {
+      const auto key = spl::visit(spl::overloaded{[](const connection::authorization::none&) { return std::optional<crypto::private_key<curve::ed25519>>(); },
+                                                  [](const connection::authorization::signed_by& s) { return std::optional(s.key); }},
+                                  a.authorization);
+      auto sealed = session::proxy_command(*r.destination, a.entity, a.command, key, random);
+      if (!sealed) return fail(sealed.error());
+      bytes body;
+      smp::put_command(body, sealed->command);
+      raw_.push_back(smp::transmission{{}, sealed->correlation, r.session_id, std::move(body)});
+      forwarded_[sealed->correlation] = in_flight{tag, a.id, std::move(*sealed), r.destination->version()};
+    }
+    send_raw();
+  }
 
  private:
   void flush() {
@@ -117,6 +188,7 @@ class router_session {
     flush();
     incoming_.push_back(incoming::ready{});
     for (const auto& [c, a] : std::exchange(held_, {})) send(a, c);
+    send_raw();
   }
   // Transmissions: answers by their correlation id, deliveries by their queue.
   void blocks(const bytes& block) {
@@ -125,6 +197,37 @@ class router_session {
     for (const auto& t : *all) {
       const auto r = smp::response_of(t.body);
       if (!r) continue;
+      if (t.correlation) {
+        if (const auto asked = prxy_.find(*t.correlation); asked != prxy_.end()) {
+          auto& relay = relays_[asked->second];
+          prxy_.erase(asked);
+          const auto* key = r->template get_if<smp::response::proxy_session_key>();
+          if (!key) {
+            for (const auto& [tag, a] : std::exchange(relay.waiting, {})) incoming_.push_back(incoming::answered{tag, a.id, *r});
+            continue;
+          }
+          auto checked = session::verify_relayed(*key, relay.router.identity);
+          if (!checked) return fail("the destination the proxy relays is not the one its address pins");
+          relay.destination = std::move(*checked);
+          relay.session_id = key->session_id;
+          crypto::system_random random;
+          flush_relay(relay, random);
+          continue;
+        }
+        if (const auto f = forwarded_.find(*t.correlation); f != forwarded_.end()) {
+          const auto flight = std::move(f->second);
+          forwarded_.erase(f);
+          const auto* pres = r->template get_if<smp::response::proxy_response>();
+          if (!pres) {
+            incoming_.push_back(incoming::answered{flight.tag, flight.action_id, *r});
+            continue;
+          }
+          auto answer = session::proxied_response(flight.sealed, *pres, flight.version);
+          if (!answer) return fail(answer.error());
+          incoming_.push_back(incoming::answered{flight.tag, flight.action_id, std::move(*answer)});
+          continue;
+        }
+      }
       const auto* m = r->template get_if<smp::response::message>();
       if (t.correlation) {
         if (const auto found = pending_.find(*t.correlation); found != pending_.end()) {
@@ -145,6 +248,10 @@ class router_session {
   std::optional<session::verified> verified_;
   std::map<smp::corr_id, std::pair<std::uint64_t, std::uint64_t>> pending_;
   std::vector<std::pair<smp::corr_id, connection::action>> held_;
+  std::map<bytes, relay> relays_;                // by the destination's identity
+  std::map<smp::corr_id, bytes> prxy_;           // a PRXY's correlation id: whose session it asks for
+  std::map<smp::corr_id, in_flight> forwarded_;  // a PFWD's
+  std::vector<smp::transmission> raw_;
   bytes plain_, outgoing_;
   std::vector<incoming_t> incoming_;
   bool failed_ = false;
