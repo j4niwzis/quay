@@ -31,7 +31,7 @@ and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, files both ways over XFTP, save/restore, re-subscription and queue switching
 both ways -- over quay's own TLS.
 
-Not yet: group roles and moderation.
+Not yet: moderation of members' messages, and the rest of what group admins can do.
 
 ## Keeping a connection: save before you send
 

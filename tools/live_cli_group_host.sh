@@ -29,10 +29,12 @@ ws "#$group hello host quay, from the CLI" --wait 5 > /dev/null || true
 wait $test_pid && status=0 || status=$?
 echo "--- the test said:"; cat "$dir/test.log"
 sleep 2
-ws "/tail #$group 4" | python3 -c '
+ws "/tail #$group 8" | python3 -c '
 import json, sys
 for line in sys.stdin:
     for it in json.loads(line).get("resp", {}).get("chatItems", []):
         print("the CLI, in quay'"'"'s group:", it.get("chatItem", {}).get("meta", {}).get("itemText", "")[:70])' | tee "$dir/tail.txt"
 grep -q "from your host quay" "$dir/tail.txt" || { echo "the CLI did not get quay's group message"; grep -o '"type":"[a-zA-Z]*"' "$dir/join.json" | sort | uniq -c; exit 1; }
+grep -qi "admin" "$dir/tail.txt" || { echo "the CLI did not see its new role"; exit 1; }
+grep -qi "deleted" "$dir/tail.txt" || { echo "the CLI did not see the group deleted"; exit 1; }
 exit $status

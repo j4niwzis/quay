@@ -144,8 +144,16 @@ int main(int, char** argv) {
         auto out = member->send(chat::body_of(chat::message_of(chat::event::message_new{chat::text_content("hello members, from your host quay")}, member_id(rng))), rng);
         if (!out) throw std::runtime_error(out.error());
         handle(1, out->second);
-        said = true;
         std::println("our group message sent");
+        // As its owner: the CLI made an admin, then the group deleted.
+        for (const auto& body : {chat::body_of(chat::message_of(chat::event::group_member_role{theirs, "admin"}, member_id(rng))),
+                                 chat::body_of(chat::message_of(chat::event::group_delete{}, member_id(rng)))}) {
+          auto next = member->send(body, rng);
+          if (!next) throw std::runtime_error(next.error());
+          handle(1, next->second);
+        }
+        std::println("the CLI made an admin (x.grp.mem.role), the group deleted (x.grp.del)");
+        said = true;
       }
     }
     for (auto out = session.take_outgoing(); !out.empty();) {
