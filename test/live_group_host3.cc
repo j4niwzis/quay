@@ -85,6 +85,7 @@ int main(int argc, char** argv) {
     }
     std::vector<std::pair<std::uint64_t, connection::output>> later;
     bool forwarded = false, heard_second = false;
+    std::optional<std::string> bob_message;  // the second member's message, to moderate
     const auto info_of = [&](const member& m) { return chat::event::member_info{m.id, "member", m.versions, *m.profile}; };
     const auto send_to_member = [&](std::size_t i, const auto& event) {
       auto sent = members[i].link->send(chat::body_of(chat::message_of(event, new_id())), rng);
@@ -154,7 +155,10 @@ int main(int argc, char** argv) {
                                                                   },
                                                                   [&](const chat::event::message_new& n) {
                                                                     std::println("{} {}: x.msg.new: {}", is_link ? "member" : "contact", i + 1, n.content.text);
-                                                                    if (is_link && i == 1) heard_second = true;
+                                                                    if (is_link && i == 1) {
+                                                                      heard_second = true;
+                                                                      bob_message = c.message_id;
+                                                                    }
                                                                   },
                                                                   [&](const auto&) { std::println("{} {}: {}", is_link ? "member" : "contact", i + 1, c.event); }},
                                                   c.params.data());
@@ -198,6 +202,35 @@ int main(int argc, char** argv) {
         m.link.emplace(std::move(conn));
         m.invited = true;
         handle(2 * i + 1, first);
+      }
+    }
+    // As its owner: the second member's message moderated (x.msg.del with its
+    // member id), then the member removed (x.grp.mem.del), told to everyone.
+    if (bob_message) {
+      for (std::size_t i = 0; i < members.size(); ++i) {
+        send_to_member(i, chat::event::message_delete{*bob_message, members[1].id});
+        send_to_member(i, chat::event::group_member_delete{members[1].id, std::nullopt});
+      }
+      for (auto todo = std::exchange(later, {}); auto& [tag, out] : todo) session.submit(tag, out, rng);
+      std::println("the second member's message moderated (x.msg.del), the member removed (x.grp.mem.del)");
+      // Long enough for the router to take them.
+      for (int round = 0; round < 6; ++round) {
+        for (auto out = session.take_outgoing(); !out.empty();) {
+          const auto n = ::send(fd, out.data(), out.size(), 0);
+          if (n <= 0) break;
+          out.erase(out.begin(), out.begin() + n);
+        }
+        std::array<byte, 16384> buffer{};
+        const auto n = ::recv(fd, buffer.data(), buffer.size(), MSG_DONTWAIT);
+        if (n > 0) session.received(std::span<const byte>(buffer.data(), static_cast<std::size_t>(n)));
+        for (const auto& in : session.take_incoming())
+          spl::visit(spl::overloaded{[&](const client::incoming::answered& a) {
+                                       auto& m = members[a.tag / 2];
+                                       if (a.tag % 2 == 1 && m.link) session.submit(a.tag, m.link->answered(a.action_id, a.response, rng), rng);
+                                     },
+                                     [](const auto&) {}},
+                     in);
+        ::usleep(300000);
       }
     }
     for (auto out = session.take_outgoing(); !out.empty();) {
