@@ -4,7 +4,9 @@
 // quay joins the group's invitation link with x.grp.acpt as its member
 // connection's info -- a second connection on the same router session
 // (quay.client) -- and once connected, takes the CLI's group message and
-// sends its own into the group (tools/live_cli_group.sh checks the CLI got it).
+// sends its own into the group (tools/live_cli_group.sh checks the CLI got it);
+// with another member (QUAY_GROUP_FORWARD, tools/live_cli_group3.sh), takes
+// that member's message as the host forwards it.
 // Usage: live_group <the CLI's invitation>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -31,7 +33,9 @@ int main(int, char** argv) {
     std::ifstream file(argv[1]);
     const std::string text((std::istreambuf_iterator<char>(file)), {});
     const auto link = agent::link_of(text);
-    const auto& inv = *link->template get_if<agent::link::invitation>();
+    const auto* invitation = link ? link->template get_if<agent::link::invitation>() : nullptr;
+    if (!invitation) throw std::runtime_error("not an invitation link: " + text);
+    const auto& inv = *invitation;
     const auto router = inv.queues.front().address.router;
     crypto::system_random rng;
     sockaddr_in where{};
@@ -54,17 +58,35 @@ int main(int, char** argv) {
     conns[0].emplace(std::move(joined->first));
     session.submit(0, joined->second, rng);
     std::optional<chat::group_invitation> invited;
-    bool member_connected = false, said = false, heard = false;
+    std::optional<connection::inviting> member_link;  // 2: the member we were introduced to, joining our invitation
+    std::optional<std::string> introduced_id;
+    bool member_connected = false, said = false, heard = false, forwarded = false, allowed = false;
+    const bool want_forward = std::getenv("QUAY_GROUP_FORWARD") != nullptr;
 
+    std::optional<connection::output> pending_member_output;
+    std::vector<std::pair<std::uint64_t, connection::output>> handle_later;
     const auto handle = [&](std::uint64_t tag, const connection::output& out) {
       session.submit(tag, out, rng);
       for (const auto& e : out.events)
-        spl::visit(spl::overloaded{[&](const connection::event::connected&) {
-                                     std::println("{}: connected", tag == 0 ? "the contact" : "our member connection");
+        spl::visit(spl::overloaded{[&](const connection::event::invitation& i) {
+                                     if (tag != 2) return;
+                                     std::println("our invitation for the introduced member, sent to the host (x.grp.mem.inv)");
+                                     const auto body = chat::body_of(chat::message_of(chat::event::group_member_invite{*introduced_id, {i.link}}));
+                                     auto sent = conns[1]->send(body, rng);
+                                     if (!sent) throw std::runtime_error(sent.error());
+                                     handle_later.push_back({1, std::move(sent->second)});
+                                   },
+                                   [&](const connection::event::connected&) {
+                                     std::println("{}: connected", tag == 0 ? "the contact" : tag == 1 ? "our member connection" : "the introduced member");
                                      if (tag == 1) member_connected = true;
                                    },
                                    [&](const connection::event::confirmed& c) {
                                      if (tag == 1) std::println("the host's info: {}", std::string(c.info.begin(), c.info.begin() + std::min<std::size_t>(70, c.info.size())));
+                                     if (tag == 2 && !allowed) {
+                                       std::println("the introduced member joins us: {}", std::string(c.info.begin(), c.info.begin() + std::min<std::size_t>(70, c.info.size())));
+                                       allowed = true;
+                                       handle_later.push_back({2, member_link->allow()});
+                                     }
                                    },
                                    [&](const connection::event::message& m) {
                                      const auto chats = chat::messages_of(m.body);
@@ -76,8 +98,31 @@ int main(int, char** argv) {
                                                                     invited = g.group_invitation;
                                                                   },
                                                                   [&](const chat::event::message_new& n) {
-                                                                    std::println("{}: x.msg.new: {}", tag == 0 ? "contact" : "group", n.content.text);
+                                                                    std::println("{}: x.msg.new: {}", tag == 0 ? "contact" : tag == 1 ? "group (the host)" : "group (the member, directly)", n.content.text);
                                                                     if (tag == 1) heard = true;
+                                                                    if (tag == 2) forwarded = true;  // the other member's message reached us
+                                                                  },
+                                                                  [&](const chat::event::group_forward& f) {
+                                                                    spl::visit(spl::overloaded{[&](const chat::event::message_new& n) {
+                                                                                                 std::println("group: forwarded from {}: {}", f.member_name.value_or("?"), n.content.text);
+                                                                                                 forwarded = true;
+                                                                                               },
+                                                                                               [&](const auto&) { std::println("group: forwarded {}", f.message.event); }},
+                                                                               f.message.params.data());
+                                                                  },
+                                                                  [&](const chat::event::group_member_intro& m) {
+                                                                    std::println("group: introduced to {} ({})", m.member_info.profile.display_name, m.member_info.member_role);
+                                                                    if (member_link) return;
+                                                                    // Our invitation for it, its info x.grp.mem.info -- ours -- and no KEM, as simplex-chat makes these.
+                                                                    const auto info = chat::body_of(
+                                                                        chat::message_of(chat::event::group_member_info{invited->invited_member.member_id, chat::profile{name, "", {}, {}, {}, {}}}), false);
+                                                                    auto [conn, first] = connection::inviting::invite(router, info, false, rng);
+                                                                    member_link.emplace(std::move(conn));
+                                                                    introduced_id = m.member_info.member_id;
+                                                                    pending_member_output = std::move(first);
+                                                                  },
+                                                                  [&](const chat::event::group_member_new& m) {
+                                                                    std::println("group: a new member, {}", m.member_info.profile.display_name);
                                                                   },
                                                                   [&](const auto&) { std::println("{}: {}", tag == 0 ? "contact" : "group", c.event); }},
                                                   c.params.data());
@@ -87,7 +132,7 @@ int main(int, char** argv) {
                    e);
     };
 
-    for (int i = 0; i < 120 && !(said && heard); ++i) {
+    for (int i = 0; i < 160 && !(said && heard && (forwarded || !want_forward)); ++i) {
       for (auto out = session.take_outgoing(); !out.empty();) {
         const auto n = ::send(fd, out.data(), out.size(), 0);
         if (n <= 0) throw std::runtime_error("send failed");
@@ -100,13 +145,17 @@ int main(int, char** argv) {
       for (const auto& in : session.take_incoming())
         spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
-                                     if (conns[a.tag]) handle(a.tag, conns[a.tag]->answered(a.action_id, a.response, rng));
+                                     if (a.tag == 2 && member_link) handle(2, member_link->answered(a.action_id, a.response, rng));
+                                     else if (a.tag < conns.size() && conns[a.tag]) handle(a.tag, conns[a.tag]->answered(a.action_id, a.response, rng));
                                    },
                                    [&](const client::incoming::delivered& d) {
+                                     if (member_link && member_link->owns(d.queue_id)) return handle(2, member_link->delivered(d.queue_id, d.message, rng));
                                      for (std::uint64_t tag = 0; tag < conns.size(); ++tag)
                                        if (conns[tag] && conns[tag]->owns(d.queue_id)) return handle(tag, conns[tag]->delivered(d.queue_id, d.message, rng));
                                    }},
                    in);
+      if (pending_member_output) handle(2, *std::exchange(pending_member_output, std::nullopt));
+      for (auto later = std::exchange(handle_later, {}); auto& [tag, out] : later) handle(tag, out);
       if (invited && !conns[1]) {
         // Accepted: the group's invitation link joined, x.grp.acpt as what our member connection says.
         const auto group_link = agent::link_of(invited->connection_link);
@@ -121,9 +170,16 @@ int main(int, char** argv) {
       }
       if (member_connected && heard && !said) {
         const auto body = chat::body_of(chat::message_of(chat::event::message_new{chat::text_content("hello group, from quay")}, "cXVheWdyb3VwMTIz"));
+        // A group message goes to every member we are connected with: the host, and the member it introduced.
         auto out = conns[1]->send(body, rng);
         if (!out) throw std::runtime_error(out.error());
         handle(1, out->second);
+        if (member_link && member_link->connected()) {
+          auto direct = member_link->send(body, rng);
+          if (!direct) throw std::runtime_error(direct.error());
+          handle(2, direct->second);
+          std::println("our group message sent to the introduced member as well");
+        }
         said = true;
         std::println("our group message sent");
       }
@@ -134,8 +190,9 @@ int main(int, char** argv) {
       out.erase(out.begin(), out.begin() + n);
     }
     ::sleep(2);
-    std::println("live group: {}", said && heard ? "passed" : "FAILED");
-    return said && heard ? 0 : 1;
+    const bool ok = said && heard && (forwarded || !want_forward);
+    std::println("live group: {}", ok ? "passed" : "FAILED");
+    return ok ? 0 : 1;
   } catch (const std::exception& failed) {
     std::println("live group: FAILED: {}", failed.what());
     return 1;

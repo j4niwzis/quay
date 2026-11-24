@@ -132,6 +132,11 @@ jobs:
             -s "smp://${fingerprint}@127.0.0.1:15223" --xftp-server "xftp://$(sudo cat /etc/opt/simplex-xftp/fingerprint)@127.0.0.1:15443" --smp-proxy never -p 5225 -y < /dev/null > /tmp/chat/cli.log 2>&1 &)
           for i in $(seq 1 100); do (exec 3<>/dev/tcp/127.0.0.1/5225) 2>/dev/null && break; sleep 0.3; done
           (exec 3<>/dev/tcp/127.0.0.1/5225) 2>/dev/null || { echo "the CLI did not start"; cat /tmp/chat/cli.log; exit 1; }
+          # And a second one, bob, on 5226: another member for the group tests.
+          mkdir -p /tmp/chat2
+          (cd /tmp/chat2 && HOME=/tmp/chat2 setsid nohup /tmp/simplex-chat -d /tmp/chat2/cli --user-display-name bob \
+            -s "smp://${fingerprint}@127.0.0.1:15223" --xftp-server "xftp://$(sudo cat /etc/opt/simplex-xftp/fingerprint)@127.0.0.1:15443" --smp-proxy never -p 5226 -y < /dev/null > /tmp/chat2/cli.log 2>&1 &)
+          for i in $(seq 1 100); do (exec 3<>/dev/tcp/127.0.0.1/5226) 2>/dev/null && break; sleep 0.3; done
 
       - name: test
         run: ctest --test-dir build --output-on-failure

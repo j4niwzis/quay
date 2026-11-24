@@ -248,6 +248,32 @@ struct group_member_intro {  // x.grp.mem.intro: a member we are introduced to
 consteval auto json_schema(knot::type<group_member_intro>) {
   return knot::schema<group_member_intro>().member<"member_info">(knot::key("memberInfo")).tag("x.grp.mem.intro");
 }
+struct member_introduction {  // where an introduced member is to join us: our invitation link
+  std::string connection_link;
+};
+consteval auto json_schema(knot::type<member_introduction>) {
+  return knot::schema<member_introduction>().member<"connection_link">(knot::key("groupConnReq"));
+}
+struct group_member_invite {  // x.grp.mem.inv: to the host, for the member it introduced us to
+  std::string member_id;
+  chat::event::member_introduction introduction;
+};
+consteval auto json_schema(knot::type<group_member_invite>) {
+  return knot::schema<group_member_invite>()
+      .member<"member_id">(knot::key("memberId"))
+      .member<"introduction">(knot::key("memberIntro"))
+      .tag("x.grp.mem.inv");
+}
+struct group_member_forward {  // x.grp.mem.fwd: from the host, a member's invitation link to join
+  chat::event::member_info member_info;
+  chat::event::member_introduction introduction;
+};
+consteval auto json_schema(knot::type<group_member_forward>) {
+  return knot::schema<group_member_forward>()
+      .member<"member_info">(knot::key("memberInfo"))
+      .member<"introduction">(knot::key("memberIntro"))
+      .tag("x.grp.mem.fwd");
+}
 struct group_member_delete {  // x.grp.mem.del: a member removed
   std::string member_id;
   std::optional<bool> messages;
@@ -294,7 +320,8 @@ template <class... More>
 using params_of = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok, event::message_new,
                                event::message_update, event::message_delete, event::message_react, event::file_description, event::group_invite,
                                event::group_accept, event::group_member_info, event::group_member_new, event::group_member_intro,
-                               event::group_member_delete, event::group_leave, event::group_delete, event::direct_delete, More..., knot::raw>;
+                               event::group_member_delete, event::group_member_invite, event::group_member_forward, event::group_leave,
+                               event::group_delete, event::direct_delete, More..., knot::raw>;
 // A message as a host forwards it: a member's, inside x.grp.msg.forward.
 struct forwarded_message {
   std::optional<std::string> v;
