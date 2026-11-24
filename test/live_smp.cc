@@ -132,7 +132,7 @@ int main() {
     send_all(*block_of(std::span(&send, 1), agreed));
 
     // As its recipient (subscribed by NEW's 'S'): the message, both layers off.
-    const auto [msg_t, msg] = await<response::message>();
+    auto [msg_t, msg] = await<response::message>();
     check(msg_t.entity == ids.recipient_id, "a message for the queue (MSG)");
     const auto received = router_layer_off(*crypto::box_key_of(ids.server_dh, recipient_dh.priv), msg);
     check(received.has_value(), "the router's layer off");
@@ -144,6 +144,48 @@ int main() {
     check(opened.has_value(), "the sender's layer off");
     const auto* confirmation = opened->second.template get_if<e2e::confirmation>();
     check(confirmation && confirmation->body == bytes({'h', 'e', 'l', 'l', 'o', ' ', 'q', 'u', 'a', 'y'}), "its body as sent: hello quay");
+
+    // Private message routing: the router asked to proxy to a destination
+    // (itself, here) -- PRXY; the destination as the proxy says it (PKEY),
+    // checked; a confirmation sent there through it (PFWD), the
+    // destination's answer passed back (PRES); the message received.
+    bytes prxy_body;
+    put_command(prxy_body, command::proxy_session{router{*identity, {address.substr(0, colon)}, static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1)))}, std::nullopt});
+    const auto c5 = fresh();
+    const transmission prxy{{}, c5, {}, prxy_body};
+    send_all(*block_of(std::span(&prxy, 1), agreed));
+    const auto [pkey_t, pkey] = await<response::proxy_session_key>(c5);
+    check(!pkey.session_id.empty(), "PRXY: the proxy's session with the destination (PKEY)");
+    const auto destination = session::verify_relayed(pkey, *identity);
+    check(destination.has_value(), "the destination authenticated as the proxy relays it: its chain, pinned identity, signed session key");
+    auto other = *identity;
+    other[0] ^= 1;
+    check(!session::verify_relayed(pkey, other).has_value(), "another identity refused");
+    const auto sealed2 = e2e_confirmation(e2e_key, 4, sender_dh.pub, std::nullopt, bytes{'v', 'i', 'a', ' ', 'p', 'r', 'o', 'x', 'y'}, rng);
+    const auto proxied = session::proxy_command(*destination, ids.sender_id, command::send{true, *sealed2}, std::nullopt, rng);
+    check(proxied.has_value(), "a SEND sealed for the destination");
+    bytes pfwd_body;
+    put_command(pfwd_body, proxied->command);
+    const transmission pfwd{{}, proxied->correlation, pkey.session_id, pfwd_body};
+    send_all(*block_of(std::span(&pfwd, 1), agreed));
+    const auto [pres_t, pres] = await<response::proxy_response>(proxied->correlation);
+    const auto answer = session::proxied_response(*proxied, pres, destination->version());
+    check(answer && answer->template get_if<response::ok>() != nullptr, "PFWD: the destination's OK, passed back (PRES)");
+    // The first message acknowledged, the proxied one comes.
+    bytes ack0;
+    put_command(ack0, command::acknowledge{msg.id});
+    const auto c6 = fresh();
+    const transmission ack0_t{session::signature_over(*verified, recipient_auth.priv, c6, ids.recipient_id, ack0), c6, ids.recipient_id, ack0};
+    send_all(*block_of(std::span(&ack0_t, 1), agreed));
+    auto [via_t, via] = await<response::message>();
+    const auto via_received = router_layer_off(*crypto::box_key_of(ids.server_dh, recipient_dh.priv), via);
+    const auto* via_sent = via_received ? via_received->template get_if<received::sent>() : nullptr;
+    const auto via_opened = via_sent ? e2e_open(via_sent->message, [&](const std::optional<public_key<curve::x25519>>& theirs) {
+      return crypto::box_key_of(*theirs, recipient_e2e.priv);
+    }) : std::unexpected(layer_error(decode_error(errors::short_input{})));
+    const auto* via_confirmation = via_opened ? via_opened->second.template get_if<e2e::confirmation>() : nullptr;
+    check(via_confirmation && via_confirmation->body == bytes({'v', 'i', 'a', ' ', 'p', 'r', 'o', 'x', 'y'}), "the message sent through the proxy received: via proxy");
+    msg = via;
 
     bytes ack_body;
     put_command(ack_body, command::acknowledge{msg.id});

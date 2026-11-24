@@ -765,6 +765,20 @@ constexpr void put_transmission(Out& out, const transmission& t, std::uint16_t v
   if (version >= service_signature_version && !t.authorization.empty()) put_byte(out, '0');
   put_unsigned_part(out, t.correlation, t.entity, t.body);
 }
+// Transmissions batched: their count, each with its length -- unpadded.
+[[nodiscard]] constexpr std::expected<bytes, decode_error> batch_of(std::span<const transmission> all, std::uint16_t version) {
+  bytes content;
+  if (all.empty() || all.size() > 255) return std::unexpected(errors::too_long{all.size()});
+  put_byte(content, static_cast<byte>(all.size()));
+  for (const auto& t : all) {
+    bytes one;
+    put_transmission(one, t, version);
+    if (one.size() > 65535) return std::unexpected(errors::too_long{one.size()});
+    put_u16(content, static_cast<std::uint16_t>(one.size()));
+    put_bytes(content, one);
+  }
+  return content;
+}
 // Transmissions in a padded block: their count, each with its length.
 // Too many for one block: nothing written.
 [[nodiscard]] constexpr std::expected<bytes, decode_error> block_of(std::span<const transmission> all, std::uint16_t version) {

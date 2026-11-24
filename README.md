@@ -13,7 +13,7 @@ comes is fed to it, and the caller's transport and control flow carry it.
 | `quay.crypto` | on [Botan](https://botan.randombit.net) 3: X25519/X448, Ed25519/Ed448, NaCl box and secretbox (XSalsa20-Poly1305), AES-256-GCM with any IV length (SimpleX's ratchet uses 16 bytes), SHA-256/512, SHA3-256/384, Keccak-256, HMAC-SHA512, HKDF-SHA512; and sntrup761 (OpenSSH's public-domain implementation, vendored) |
 | `quay.snapshot` | a value as bytes and back, written from its type -- for keeping connections between runs |
 | `quay.smp` | SMP: commands and responses, transmissions and blocks, the hellos, the router's and the sender's layers |
-| `quay.session` | the router authenticated: its certificate chain against the identity its address pins, the session key it signs, this TLS session's Finished |
+| `quay.session` | the router authenticated: its certificate chain against the identity its address pins, the session key it signs, this TLS session's Finished; a destination reached through a proxy authenticated from what the proxy relays, and commands sealed for it (private message routing) |
 | `quay.tls` | TLS 1.3 to a router, sans-IO, on Botan (ALPN `smp/1`; EdDSA certificates, which Botan's TLS leaves out, put back at configure time) |
 | `quay.ratchet` | the post-quantum double ratchet (X448, sntrup761 KEM), as simplexmq's |
 | `quay.agent` | the agent's messages, envelopes, queue addresses and links (`simplex:/invitation`, `simplex:/contact`) |
@@ -31,7 +31,7 @@ and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, files both ways over XFTP, save/restore, re-subscription and queue switching
 both ways -- over quay's own TLS.
 
-Not yet: group roles and moderation, private message routing.
+Not yet: group roles and moderation; private routing wired into quay.client (its primitives are in quay.session).
 
 ## Keeping a connection: save before you send
 

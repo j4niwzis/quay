@@ -58,6 +58,8 @@ using pin_error = spl::variant<errors::chain_shape, errors::bad_certificate, err
 class verified;
 std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls,
                                          smp::version_range ours = {smp::min_version, smp::max_version});
+std::expected<verified, pin_error> verify_relayed(const smp::response::proxy_session_key& key, std::span<const byte> identity,
+                                                 smp::version_range ours = {smp::min_version, smp::max_version});
 class verified {
  public:
   [[nodiscard]] const smp::router_hello& hello() const { return hello_; }
@@ -69,6 +71,7 @@ class verified {
   verified(smp::router_hello hello, public_key<curve::x25519> key, std::uint16_t version)
       : hello_(std::move(hello)), router_key_(key), version_(version) {}
   friend std::expected<verified, pin_error> verify(const smp::router_hello&, std::span<const byte>, const tls_facts&, smp::version_range);
+  friend std::expected<verified, pin_error> verify_relayed(const smp::response::proxy_session_key&, std::span<const byte>, smp::version_range);
   smp::router_hello hello_;
   public_key<curve::x25519> router_key_;
   std::uint16_t version_ = 0;
@@ -120,9 +123,11 @@ inline std::optional<signed_object> signed_object_of(std::span<const byte> der) 
 }
 }  // namespace detail
 
-inline std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls,
-                                                smp::version_range ours) {
-  const auto& chain = tls.peer_chain;
+// A router's chain and the session key its leaf signs, checked: each
+// certificate signed by the next, the second the identity pinned, the
+// session key signed by the leaf. The session key, where all holds.
+inline std::expected<public_key<curve::x25519>, pin_error> session_key_of(const std::vector<bytes>& chain, std::span<const byte> signed_key_der,
+                                                                         std::span<const byte> identity) {
   if (chain.size() < 2 || chain.size() > 4) return std::unexpected(errors::chain_shape{chain.size()});
   std::vector<std::unique_ptr<Botan::X509_Certificate>> certificates;
   for (std::size_t i = 0; i < chain.size(); ++i) {
@@ -143,9 +148,8 @@ inline std::expected<verified, pin_error> verify(const smp::router_hello& hello,
   }
   // The identity certificate -- the second, whatever the length (chainIdCaCerts).
   if (!std::ranges::equal(crypto::sha256(chain[1]), identity)) return std::unexpected(errors::identity{});
-  if (hello.certificates != chain) return std::unexpected(errors::chain_mismatch{});
   // The session key, signed by the TLS leaf's key.
-  const auto signed_key = detail::signed_object_of(hello.signed_key);
+  const auto signed_key = detail::signed_object_of(signed_key_der);
   if (!signed_key) return std::unexpected(errors::no_session_key{});
   try {
     const auto leaf_key = certificates[0]->subject_public_key();
@@ -159,11 +163,33 @@ inline std::expected<verified, pin_error> verify(const smp::router_hello& hello,
   auto session_key = key_from_spki<curve::x25519>(signed_key->inner);
   if (!session_key) session_key = key_from_spki<curve::x25519>(signed_key->signed_data);
   if (!session_key) return std::unexpected(errors::no_session_key{});
+  return *session_key;
+}
+
+inline std::expected<verified, pin_error> verify(const smp::router_hello& hello, std::span<const byte> identity, const tls_facts& tls,
+                                                smp::version_range ours) {
+  const auto key = session_key_of(tls.peer_chain, hello.signed_key, identity);
+  if (!key) return std::unexpected(key.error());
+  if (hello.certificates != tls.peer_chain) return std::unexpected(errors::chain_mismatch{});
   // The session: this TLS connection's, not another's relayed.
   if (hello.session_id != tls.finished) return std::unexpected(errors::session{});
   const auto agreed = smp::agreed_version(hello.versions, ours);
   if (!agreed) return std::unexpected(errors::version{});
-  return verified{hello, *session_key, *agreed};
+  return verified{hello, *key, *agreed};
+}
+
+// A destination router reached through a proxy (private message routing):
+// what the proxy said of it (PKEY) -- its session with it, its versions, its
+// chain and signed session key -- checked as a router's own hello is,
+// against the identity its address pins; the session is the proxy's, not
+// ours, so no TLS of ours to bind it to.
+inline std::expected<verified, pin_error> verify_relayed(const smp::response::proxy_session_key& key, std::span<const byte> identity,
+                                                        smp::version_range ours) {
+  const auto session_key = session_key_of(key.certificates, key.signed_key, identity);
+  if (!session_key) return std::unexpected(session_key.error());
+  const auto agreed = smp::agreed_version(key.versions, ours);
+  if (!agreed) return std::unexpected(errors::version{});
+  return verified{smp::router_hello{key.versions, key.session_id, key.certificates, key.signed_key}, *session_key, *agreed};
 }
 
 // A recipient's command signed with its Ed25519 key, in a verified session
@@ -187,6 +213,54 @@ inline std::expected<bytes, crypto::crypto_error> authenticator_over(const verif
   if (!box) return std::unexpected(box.error());
   const auto digest = crypto::sha512(authorized);
   return crypto::secretbox(*box, correlation, digest);
+}
+
+// ---- private message routing ----------------------------------------------------
+
+// A command for a router reached through a proxy, as simplexmq's
+// proxySMPCommand makes one: the transmission as the destination router
+// takes it -- in its session (verify_relayed), signed where `key` is given
+// -- batched, padded and sealed to a key of ours used once with the
+// destination's session key, the nonce its correlation id. Sent to the
+// proxy as PFWD, for the proxy session, with the same correlation id.
+struct proxied {
+  smp::command::proxy_forward command;
+  smp::corr_id correlation{};  // the nonce: the PFWD's correlation id too
+  crypto::box_key secret{};
+};
+inline constexpr std::size_t proxied_length = 16226;  // simplexmq's paddedProxiedTLength
+template <crypto::random_source R>
+std::expected<proxied, std::string> proxy_command(const verified& destination, std::span<const byte> entity, const smp::command_t& command,
+                                                  const std::optional<crypto::private_key<curve::ed25519>>& key, R& random) {
+  const auto once = crypto::generate<curve::x25519>(random);
+  const auto secret = crypto::box_key_of(destination.router_key(), once.priv);
+  if (!secret) return std::unexpected("the destination's session key refuses ours");
+  proxied out;
+  out.secret = *secret;
+  random(std::span<byte>(out.correlation));
+  bytes body;
+  smp::put_command(body, command);
+  const bytes auth = key ? signature_over(destination, *key, out.correlation, entity, body) : bytes{};
+  const smp::transmission t{auth, out.correlation, bytes(entity.begin(), entity.end()), std::move(body)};
+  const auto batch = smp::batch_of(std::span(&t, 1), destination.version());
+  if (!batch) return std::unexpected("the command does not batch");
+  bytes padded;
+  if (!put_padded(padded, *batch, proxied_length)) return std::unexpected("the command is too large to proxy");
+  out.command = smp::command::proxy_forward{destination.version(), once.pub, crypto::secretbox(out.secret, out.correlation, padded)};
+  return out;
+}
+// The destination's response, as the proxy passed it back (PRES): opened
+// with the nonce reversed, its one transmission read.
+inline std::expected<smp::response_t, std::string> proxied_response(const proxied& p, const smp::response::proxy_response& pres, std::uint16_t version) {
+  crypto::box_nonce reversed{};
+  std::ranges::reverse_copy(p.correlation, reversed.begin());
+  const auto plain = crypto::secretbox_open(p.secret, pres.nonce.value_or(reversed), pres.encrypted);
+  if (!plain) return std::unexpected("the destination's response does not open");
+  const auto all = smp::transmissions_of(*plain, version);
+  if (!all || all->size() != 1) return std::unexpected("not one transmission");
+  const auto r = smp::response_of(all->front().body);
+  if (!r) return std::unexpected("the destination's response does not read");
+  return *r;
 }
 
 }  // namespace quay::session
