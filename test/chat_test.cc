@@ -79,3 +79,22 @@ TEST(Chat, Refusals) {
   EXPECT_TRUE(!chat::messages_of(text("{\"event\":")).has_value());
   EXPECT_TRUE(!chat::messages_of(bytes{'X', 0}).has_value());
 }
+
+TEST(Chat, GroupEvents) {
+  const auto got = chat::messages_of(text(
+      R"([{"v":"1-22","event":"x.grp.mem.new","params":{"memberInfo":{"memberId":"YWJj","memberRole":"member","v":"1-22","profile":{"displayName":"bob","fullName":""}}}},)"
+      R"({"v":"1-22","msgId":"Zm9y","event":"x.grp.msg.forward","params":{"memberId":"YWJj","memberName":"bob","msgTs":"2026-11-24T01:00:00Z","msg":{"v":"1-22","msgId":"aW4=","event":"x.msg.new","params":{"content":{"type":"text","text":"hi all"}}}}},)"
+      R"({"v":"1-22","event":"x.grp.mem.del","params":{"memberId":"YWJj"}},)"
+      R"({"v":"1-22","event":"x.grp.leave","params":{}}])"));
+  ASSERT_TRUE(got.has_value());
+  ASSERT_EQ(got->size(), 4u);
+  ASSERT_TRUE((*got)[0].params.is<chat::event::group_member_new>());
+  EXPECT_EQ((*got)[0].params.as<chat::event::group_member_new>().member_info.profile.display_name, "bob");
+  ASSERT_TRUE((*got)[1].params.is<chat::event::group_forward>());
+  const auto& fwd = (*got)[1].params.as<chat::event::group_forward>();
+  EXPECT_TRUE(fwd.member_name == std::optional<std::string>("bob"));
+  ASSERT_TRUE(fwd.message.params.is<chat::event::message_new>());
+  EXPECT_EQ(fwd.message.params.as<chat::event::message_new>().content.text, "hi all");
+  EXPECT_TRUE((*got)[2].params.is<chat::event::group_member_delete>());
+  EXPECT_TRUE((*got)[3].params.is<chat::event::group_leave>());
+}

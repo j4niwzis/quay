@@ -227,6 +227,38 @@ struct group_member_info {  // x.grp.mem.info: the host's, on our member connect
 consteval auto json_schema(knot::type<group_member_info>) {
   return knot::schema<group_member_info>().member<"member_id">(knot::key("memberId")).tag("x.grp.mem.info");
 }
+struct member_info {
+  std::string member_id;
+  std::string member_role;
+  std::optional<std::string> v;
+  chat::profile profile;
+};
+consteval auto json_schema(knot::type<member_info>) {
+  return knot::schema<member_info>().member<"member_id">(knot::key("memberId")).member<"member_role">(knot::key("memberRole"));
+}
+struct group_member_new {  // x.grp.mem.new: a member joined (the host says)
+  chat::event::member_info member_info;
+};
+consteval auto json_schema(knot::type<group_member_new>) {
+  return knot::schema<group_member_new>().member<"member_info">(knot::key("memberInfo")).tag("x.grp.mem.new");
+}
+struct group_member_intro {  // x.grp.mem.intro: a member we are introduced to
+  chat::event::member_info member_info;
+};
+consteval auto json_schema(knot::type<group_member_intro>) {
+  return knot::schema<group_member_intro>().member<"member_info">(knot::key("memberInfo")).tag("x.grp.mem.intro");
+}
+struct group_member_delete {  // x.grp.mem.del: a member removed
+  std::string member_id;
+  std::optional<bool> messages;
+};
+consteval auto json_schema(knot::type<group_member_delete>) {
+  return knot::schema<group_member_delete>().member<"member_id">(knot::key("memberId")).tag("x.grp.mem.del");
+}
+struct group_leave {};  // x.grp.leave: the sender left
+consteval auto json_schema(knot::type<group_leave>) { return knot::schema<group_leave>().tag("x.grp.leave"); }
+struct group_delete {};  // x.grp.del: the group deleted
+consteval auto json_schema(knot::type<group_delete>) { return knot::schema<group_delete>().tag("x.grp.del"); }
 struct direct_delete {};  // x.direct.del: the contact deleted us
 consteval auto json_schema(knot::type<info>) { return knot::schema<info>().tag("x.info"); }
 consteval auto json_schema(knot::type<info_probe>) { return knot::schema<info_probe>().tag("x.info.probe"); }
@@ -255,10 +287,39 @@ consteval auto json_schema(knot::type<direct_delete>) { return knot::schema<dire
 
 }  // namespace event
 // The params, chosen by the event; any other event's kept as its JSON text.
-using params_t = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok,
-                              event::message_new, event::message_update, event::message_delete, event::message_react, event::file_description,
-                              event::group_invite, event::group_accept, event::group_member_info,
-                              event::direct_delete, knot::raw>;
+// A forwarded message (x.grp.msg.forward) carries a message inside, whose
+// params are any of these but another forward -- simplex-chat forwards
+// once -- so the list is said once and the forward added over it.
+template <class... More>
+using params_of = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok, event::message_new,
+                               event::message_update, event::message_delete, event::message_react, event::file_description, event::group_invite,
+                               event::group_accept, event::group_member_info, event::group_member_new, event::group_member_intro,
+                               event::group_member_delete, event::group_leave, event::group_delete, event::direct_delete, More..., knot::raw>;
+// A message as a host forwards it: a member's, inside x.grp.msg.forward.
+struct forwarded_message {
+  std::optional<std::string> v;
+  std::optional<std::string> message_id;
+  std::string event;
+  params_of<> params;
+};
+consteval auto json_schema(knot::type<forwarded_message>) { return knot::schema<forwarded_message>().member<"message_id">(knot::key("msgId")); }
+namespace event {
+struct group_forward {  // x.grp.msg.forward: a member's message, through the host
+  std::optional<std::string> member_id;
+  std::optional<std::string> member_name;
+  forwarded_message message;
+  std::string message_time;
+};
+consteval auto json_schema(knot::type<group_forward>) {
+  return knot::schema<group_forward>()
+      .member<"member_id">(knot::key("memberId"))
+      .member<"member_name">(knot::key("memberName"))
+      .member<"message">(knot::key("msg"))
+      .member<"message_time">(knot::key("msgTs"))
+      .tag("x.grp.msg.forward");
+}
+}  // namespace event
+using params_t = params_of<event::group_forward>;
 
 struct message {
   std::optional<std::string> v;           // the sender's versions
