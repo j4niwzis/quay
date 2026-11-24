@@ -107,7 +107,7 @@ int main(int, char** argv) {
     for (int i = 0; i < 160 && !(said && heard); ++i) {
       pump(fd, session);
       for (const auto& in : session.take_incoming())
-        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
+        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::alive&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
                                      if (a.tag == 0) handle(0, contact->answered(a.action_id, a.response, rng));
                                      else if (member) handle(1, member->answered(a.action_id, a.response, rng));

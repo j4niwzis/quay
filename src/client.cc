@@ -37,11 +37,12 @@ struct delivered {  // a message for the queue `queue_id`: to the connection who
   smp::response::message message;
 };
 struct ready {};  // the router authenticated and the hellos done: actions go out from now
+struct alive {};  // the router answered our ping (PONG)
 struct failed {   // the session is no good: TLS, the router's authentication, the router's framing
   std::string what;
 };
 }  // namespace incoming
-using incoming_t = spl::variant<incoming::answered, incoming::delivered, incoming::ready, incoming::failed>;
+using incoming_t = spl::variant<incoming::answered, incoming::delivered, incoming::ready, incoming::alive, incoming::failed>;
 
 class router_session {
  public:
@@ -87,6 +88,14 @@ class router_session {
       submit_raw(smp::command::proxy_session{destination, std::nullopt}, {}, random, [this, id = destination.identity](const smp::corr_id& c) { prxy_[c] = id; });
     }
     flush_relay(relay, random);
+  }
+
+  // A ping, for the program to send when the session has been quiet (the
+  // router drops a session it hears nothing from): its PONG comes as
+  // incoming::alive.
+  template <crypto::random_source R>
+  void ping(R& random) {
+    submit_raw(smp::command::ping{}, {}, random, [this](const smp::corr_id& c) { pings_.insert(c); });
   }
 
   // Bytes read from the socket.
@@ -198,6 +207,10 @@ class router_session {
       const auto r = smp::response_of(t.body);
       if (!r) continue;
       if (t.correlation) {
+        if (pings_.erase(*t.correlation)) {
+          incoming_.push_back(incoming::alive{});
+          continue;
+        }
         if (const auto asked = prxy_.find(*t.correlation); asked != prxy_.end()) {
           auto& relay = relays_[asked->second];
           prxy_.erase(asked);
@@ -252,6 +265,7 @@ class router_session {
   std::map<smp::corr_id, bytes> prxy_;           // a PRXY's correlation id: whose session it asks for
   std::map<smp::corr_id, in_flight> forwarded_;  // a PFWD's
   std::vector<smp::transmission> raw_;
+  std::set<smp::corr_id> pings_;
   bytes plain_, outgoing_;
   std::vector<incoming_t> incoming_;
   bool failed_ = false;

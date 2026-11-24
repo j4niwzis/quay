@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
     for (int round = 0; round < 200 && !(forwarded && heard_second); ++round) {
       pump(fd, session);
       for (const auto& in : session.take_incoming())
-        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
+        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::alive&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
                                      auto& m = members[a.tag / 2];
                                      if (a.tag % 2 == 0) handle(a.tag, m.contact->answered(a.action_id, a.response, rng));

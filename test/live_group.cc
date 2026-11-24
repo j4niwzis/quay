@@ -129,7 +129,7 @@ int main(int, char** argv) {
     for (int i = 0; i < 160 && !(said && heard && (forwarded || !want_forward)); ++i) {
       pump(fd, session);
       for (const auto& in : session.take_incoming())
-        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
+        spl::visit(spl::overloaded{[](const client::incoming::ready&) {}, [](const client::incoming::alive&) {}, [](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
                                      if (a.tag == 2 && member_link) handle(2, member_link->answered(a.action_id, a.response, rng));
                                      else if (a.tag < conns.size() && conns[a.tag]) handle(a.tag, conns[a.tag]->answered(a.action_id, a.response, rng));

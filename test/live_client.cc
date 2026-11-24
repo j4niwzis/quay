@@ -64,7 +64,7 @@ int main(int, char** argv) {
     auto [address, first] = connection::address::create(router, rng);
     session.submit(address_tag, first, rng);  // held until the session is ready
     std::optional<connection::joining> contact;
-    bool connected = false, sent = false, receipt = false;
+    bool connected = false, sent = false, receipt = false, alive = false;
 
     // With QUAY_PROXY, what we send to the contact (SEND) goes through our router as a proxy.
     const bool via_proxy = std::getenv("QUAY_PROXY") != nullptr;
@@ -115,7 +115,14 @@ int main(int, char** argv) {
       if (n <= 0) throw std::runtime_error(n == 0 ? "closed" : "quiet for 20 seconds");
       session.received(std::span<const byte>(buffer.data(), static_cast<std::size_t>(n)));
       for (const auto& in : session.take_incoming())
-        spl::visit(spl::overloaded{[&](const client::incoming::ready&) { std::println("the router authenticated, the session ready"); },
+        spl::visit(spl::overloaded{[&](const client::incoming::ready&) {
+                                     std::println("the router authenticated, the session ready");
+                                     session.ping(rng);
+                                   },
+                                   [&](const client::incoming::alive&) {
+                                     std::println("the router answered our ping");
+                                     alive = true;
+                                   },
                                    [&](const client::incoming::failed& f) { throw std::runtime_error(f.what); },
                                    [&](const client::incoming::answered& a) {
                                      if (a.tag == address_tag) handle(a.tag, address.answered(a.action_id, a.response, rng));
@@ -135,8 +142,8 @@ int main(int, char** argv) {
       }
     }
     write_all(fd, session.take_outgoing());
-    std::println("live client: {}", receipt ? "passed" : "FAILED");
-    return receipt ? 0 : 1;
+    std::println("live client: {}", receipt && alive ? "passed" : "FAILED");
+    return receipt && alive ? 0 : 1;
   } catch (const std::exception& failed) {
     std::println("live client: FAILED: {}", failed.what());
     return 1;
