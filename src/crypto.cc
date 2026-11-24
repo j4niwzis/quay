@@ -284,15 +284,20 @@ struct public_key {
   std::array<byte, public_size> raw{};
   friend constexpr bool operator==(const public_key&, const public_key&) = default;
 };
-struct secret_key {
+struct secret_key {  // wiped when it goes, as secret<N> is
   std::array<byte, secret_size> raw{};
+  secret_key() = default;
+  secret_key(const secret_key&) = default;
+  secret_key& operator=(const secret_key&) = default;
+  ~secret_key() { scrub(raw); }
+  friend bool operator==(const secret_key&, const secret_key&) = default;
 };
 struct key_pair {
   public_key pub;
   secret_key secret;
 };
 using ciphertext = std::array<byte, ciphertext_size>;
-using shared_secret = std::array<byte, shared_size>;
+using shared_secret = secret<shared_size>;  // wiped when it goes
 struct encapsulated {
   ciphertext cipher{};
   shared_secret shared{};
@@ -337,14 +342,14 @@ template <random_source R>
 encapsulated encapsulate(const public_key& to, R& random) {
   detail::using_random<R> scope(random);
   encapsulated out;
-  crypto_kem_sntrup761_enc(out.cipher.data(), out.shared.data(), to.raw.data());
+  crypto_kem_sntrup761_enc(out.cipher.data(), out.shared.raw.data(), to.raw.data());
   return out;
 }
 // Implicit rejection: a ciphertext not made for the key gives a secret
 // all the same -- one no one else has.
 inline shared_secret decapsulate(const secret_key& key, const ciphertext& cipher) {
   shared_secret out{};
-  crypto_kem_sntrup761_dec(out.data(), cipher.data(), key.raw.data());
+  crypto_kem_sntrup761_dec(out.raw.data(), cipher.data(), key.raw.data());
   return out;
 }
 }  // namespace sntrup761

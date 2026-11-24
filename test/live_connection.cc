@@ -167,8 +167,10 @@ int main(int, char** argv) {
       if (is_connected && !sent) {
         // As a program restarted would: the connection saved, and taken back from the bytes alone.
         const auto saved = conn.saved();
-        auto back = connection::joining::restored(saved);
+        auto back = connection::joining::restored(saved, conn.generation());
         if (!back) throw std::runtime_error("the saved connection did not restore");
+        // An older generation asked for than the one saved: refused as stale.
+        if (connection::joining::restored(saved, conn.generation() + 1)) throw std::runtime_error("a stale snapshot restored");
         conn = std::move(*back);
         std::println("connection saved ({} bytes) and restored", saved.size());
         // Long enough to go compressed: a zstd batch of one, as simplex-chat sends.

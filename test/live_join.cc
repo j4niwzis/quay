@@ -186,7 +186,7 @@ int main(int, char** argv) {
     }
     if (our_private.accepted) {
       record("simplex_our_kem_cipher", our_private.accepted->first);
-      record("simplex_our_kem_shared", our_private.accepted->second);
+      record("simplex_our_kem_shared", our_private.accepted->second.raw);
     }
     record("simplex_our_dh", own_dh.priv.raw);
     step(std::format("our ratchet made (e2e v{}, PQ {})", e2e_version, pq ? "on" : "off"));

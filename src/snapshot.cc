@@ -2,7 +2,7 @@
 // quay.snapshot -- a value as bytes and back, for keeping a connection
 // between runs: its ratchet, its queues, its keys. Written from the types
 // themselves, by overloading: integers big-endian, a key or secret its raw
-// bytes, strings and vectors counted, optionals flagged, maps counted
+// bytes, strings, vectors and deques counted, optionals flagged, maps counted
 // pairs, a variant its index and its alternative, an aggregate its members
 // in order (a structured binding pack), and a type with members it hides --
 // a move-only state -- through the tie its snapshot_fields() gives.
@@ -30,8 +30,11 @@ struct other_version {
 };
 struct bad_value {};  // a flag, an index or a count out of range
 struct trailing {};   // bytes after the value
+struct stale {        // older than the newest one the program recorded: restoring it would use keys again
+  std::uint64_t generation = 0, at_least = 0;
+};
 }  // namespace errors
-using error = spl::variant<decode_error, errors::not_a_snapshot, errors::other_version, errors::bad_value, errors::trailing>;
+using error = spl::variant<decode_error, errors::not_a_snapshot, errors::other_version, errors::bad_value, errors::trailing, errors::stale>;
 
 namespace detail {
 template <class T>
@@ -87,6 +90,11 @@ template <byte_sink Out, class T>
 static constexpr void put(Out& out, const std::vector<T>& v) {
   put(out, static_cast<std::uint32_t>(v.size()));
   for (const auto& one : v) put(out, one);
+}
+template <byte_sink Out, class T>
+static constexpr void put(Out& out, const std::deque<T>& d) {
+  put(out, static_cast<std::uint32_t>(d.size()));
+  for (const auto& one : d) put(out, one);
 }
 template <byte_sink Out, class T>
 static constexpr void put(Out& out, const std::optional<T>& o) {
@@ -198,6 +206,18 @@ static constexpr std::expected<void, error> get(R& in, std::vector<T>& v) {
     T one{};
     if (auto r = get(in, one); !r) return r;
     v.push_back(std::move(one));
+  }
+  return {};
+}
+template <class R, class T>
+static constexpr std::expected<void, error> get(R& in, std::deque<T>& d) {
+  const auto n = count(in);
+  if (!n) return std::unexpected(n.error());
+  d.clear();
+  for (std::uint32_t i = 0; i < *n; ++i) {
+    T one{};
+    if (auto r = get(in, one); !r) return r;
+    d.push_back(std::move(one));
   }
   return {};
 }

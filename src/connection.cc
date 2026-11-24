@@ -16,8 +16,18 @@
 //
 // A connection is moved, not copied (its ratchet's keys and IVs must not be
 // used twice); the caller keeps it between calls -- and between runs, as
-// the bytes saved() gives and restored() takes back (quay.snapshot): saved
-// after every call that changed it, before what it asked for is sent.
+// the bytes saved() gives and restored() takes back (quay.snapshot).
+//
+// !!! KEEPING A CONNECTION: SAVE BEFORE YOU SEND. !!!
+// Every call that returns actions has changed the connection -- its ratchet
+// has used a message key and IV for what it asks to be sent. Save it after
+// every such call and BEFORE sending any of its actions, and never restore
+// a snapshot older than the last one saved: a stale snapshot encrypts again
+// with keys and IVs already used, which breaks AES-GCM's confidentiality
+// and integrity for those messages. Move-only state guards against copies
+// in memory, not against an old file. To catch the wrong file, record
+// generation() with every save (it grows with every action) and restore
+// with restored(bytes, generation): an older snapshot is refused (stale).
 export module quay.connection;
 
 import std;
@@ -119,6 +129,9 @@ class duplex {
   duplex& operator=(const duplex&) = delete;
 
   [[nodiscard]] bool connected() const { return connected_; }
+  // How far it has gone: grows with every action it asks for, so with every
+  // call that changed it. A snapshot of a lower generation is stale.
+  [[nodiscard]] std::uint64_t generation() const { return actions_; }
   // The queue it receives on: a delivery for this id is this connection's.
   [[nodiscard]] const bytes& queue_id() const { return rcv_id_; }
   // Its queue subscribed to again -- in a new session with its router, as
@@ -372,9 +385,10 @@ class joining : public detail::duplex {
 
   [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
   template <std::ranges::input_range In>
-  static std::expected<joining, quay::snapshot::error> restored(In&& from) {
+  static std::expected<joining, quay::snapshot::error> restored(In&& from, std::uint64_t at_least = 0) {
     joining c;
     if (auto r = quay::snapshot::restore(std::forward<In>(from), c); !r) return std::unexpected(r.error());
+    if (c.generation() < at_least) return std::unexpected(quay::snapshot::errors::stale{c.generation(), at_least});
     return c;
   }
   template <class D>
@@ -611,9 +625,10 @@ class inviting : public detail::duplex {
 
   [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
   template <std::ranges::input_range In>
-  static std::expected<inviting, quay::snapshot::error> restored(In&& from) {
+  static std::expected<inviting, quay::snapshot::error> restored(In&& from, std::uint64_t at_least = 0) {
     inviting c;
     if (auto r = quay::snapshot::restore(std::forward<In>(from), c); !r) return std::unexpected(r.error());
+    if (c.generation() < at_least) return std::unexpected(quay::snapshot::errors::stale{c.generation(), at_least});
     return c;
   }
   template <class D>
@@ -690,9 +705,10 @@ class address : public detail::duplex {
 
   [[nodiscard]] bytes saved() const { return quay::snapshot::of(*this); }
   template <std::ranges::input_range In>
-  static std::expected<address, quay::snapshot::error> restored(In&& from) {
+  static std::expected<address, quay::snapshot::error> restored(In&& from, std::uint64_t at_least = 0) {
     address a;
     if (auto r = quay::snapshot::restore(std::forward<In>(from), a); !r) return std::unexpected(r.error());
+    if (a.generation() < at_least) return std::unexpected(quay::snapshot::errors::stale{a.generation(), at_least});
     return a;
   }
   template <class D>

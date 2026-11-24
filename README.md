@@ -16,6 +16,17 @@ Next: the SMP client (commands, transmissions, private routing), the agent
 (connections, envelopes, the PQ double ratchet, links), the chat protocol,
 XFTP.
 
+## Keeping a connection: save before you send
+
+A connection's state can be saved (`saved()`) and restored (`restored()`)
+between runs. **Save it after every call that returns actions, and before
+sending any of them; never restore a snapshot older than the last one
+saved.** A stale snapshot encrypts again with message keys and IVs that were
+already used, which breaks AES-GCM for those messages. Record
+`generation()` with each save and restore with `restored(bytes, generation)`
+so that an older snapshot is refused rather than silently reused. A snapshot
+holds private and chain keys: keep it as secret as the keys themselves.
+
 ## Building
 
 CMake 4.3, clang 23 with libc++ (`import std`). Botan is fetched at its

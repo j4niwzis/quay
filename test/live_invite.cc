@@ -201,8 +201,10 @@ int main(int, char** argv) {
       if (is_connected && !sent) {
         // As a program restarted would: the connection saved, and taken back from the bytes alone.
         const auto saved = conn.saved();
-        auto back = connection::inviting::restored(saved);
+        auto back = connection::inviting::restored(saved, conn.generation());
         if (!back) throw std::runtime_error("the saved connection did not restore");
+        // An older generation asked for than the one saved: refused as stale.
+        if (connection::inviting::restored(saved, conn.generation() + 1)) throw std::runtime_error("a stale snapshot restored");
         conn = std::move(*back);
         std::println("connection saved ({} bytes) and restored", saved.size());
         // And in a new session, as a program restarted: the old one closed,

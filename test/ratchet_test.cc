@@ -141,7 +141,7 @@ TEST(Ratchet, SimplexChatSessionReplayed) {
   crypto::sntrup761::ciphertext cipher{};
   crypto::sntrup761::shared_secret shared{};
   copy_into(cipher, simplex_our_kem_cipher);
-  copy_into(shared, simplex_our_kem_shared);
+  copy_into(shared.raw, simplex_our_kem_shared);
   mine.accepted = std::pair{cipher, shared};
   e2e_params theirs{version, inv.e2e.key1, inv.e2e.key2, std::nullopt};
   if (inv.e2e.kem_key) theirs.kem = kem_params::proposed{*inv.e2e.kem_key};
@@ -186,4 +186,26 @@ TEST(Ratchet, SavedAndRestored) {
   auto longer = bob_saved;
   longer.push_back(0);
   EXPECT_TRUE(!snapshot::restore(longer, none).has_value());
+}
+
+TEST(Ratchet, EvictsTheOldestSkippedKeys) {
+  counting random;
+  auto [alice, bob] = connect(false, random);
+  // Five gaps of 500 lost messages each: 2500 keys would be kept, the cap is 2048.
+  bytes last_of_first_gap;
+  for (int gap = 0; gap < 5; ++gap) {
+    for (int i = 0; i < 500; ++i) {
+      const auto lost = *encrypt(alice, text("lost"), 13618, random);
+      if (gap == 4 && i == 499) last_of_first_gap = lost;
+    }
+    const auto through = *encrypt(alice, text("through " + std::to_string(gap)), 13618, random);
+    const auto got = decrypt(bob, through, random);
+    ASSERT_TRUE(got.has_value());  // never refused for the cap
+  }
+  std::size_t held = 0;
+  for (const auto& [hk, keys] : bob.skipped) held += keys.size();
+  EXPECT_TRUE(held <= max_skipped_total);
+  EXPECT_TRUE(bob.skipped_order.size() == held);
+  // The newest skipped key is still there; a late message for it opens.
+  EXPECT_TRUE(*decrypt(bob, last_of_first_gap, random) == text("lost"));
 }

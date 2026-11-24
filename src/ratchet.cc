@@ -25,6 +25,10 @@ inline constexpr std::uint32_t max_skip = 512;
 // And skipped keys held in all, whatever the steps: a peer stepping the
 // ratchet again and again cannot make them grow without end.
 inline constexpr std::size_t max_skipped_total = 2048;
+// Past that, the oldest skipped keys are dropped to make room -- messages
+// lost long ago are given up, not every later skip refused -- and so are
+// all the keys of a receiving chain more than this many chains back.
+inline constexpr std::size_t max_skipped_chains = 16;
 
 using key32 = crypto::secret<32>;
 using iv16 = crypto::secret<16>;
@@ -187,33 +191,45 @@ struct init_params {
 };
 
 namespace detail {
-inline std::array<bytes, 3> hkdf3(std::span<const byte> salt, std::span<const byte> input, std::string_view info) {
+// HKDF-SHA512's 96 bytes as three secrets, the buffer they came in wiped.
+inline std::array<key32, 3> hkdf3(std::span<const byte> salt, std::span<const byte> input, std::string_view info) {
   const bytes label(info.begin(), info.end());
-  const bytes out = crypto::hkdf_sha512(salt, input, label, 96);
-  return {bytes(out.begin(), out.begin() + 32), bytes(out.begin() + 32, out.begin() + 64), bytes(out.begin() + 64, out.end())};
+  bytes out = crypto::hkdf_sha512(salt, input, label, 96);
+  std::array<key32, 3> keys{};
+  for (std::size_t i = 0; i < 3; ++i) std::ranges::copy(std::span(out).subspan(32 * i, 32), keys[i].raw.begin());
+  crypto::scrub(out);
+  return keys;
 }
 inline key32 key_of(const bytes& b) {
   key32 k{};
   std::ranges::copy(std::span(b).first(32), k.raw.begin());
   return k;
 }
-inline std::expected<bytes, ratchet_error> dh(const x448_public& theirs, const x448_private& mine) {
-  const auto s = crypto::agree(mine, theirs);
+using dh_secret = crypto::secret<56>;
+inline std::expected<dh_secret, ratchet_error> dh(const x448_public& theirs, const x448_private& mine) {
+  auto s = crypto::agree(mine, theirs);
   if (!s) return std::unexpected(ratchet_error(s.error()));
-  return bytes(s->begin(), s->end());
+  dh_secret out;
+  out.raw = *s;
+  crypto::scrub(*s);
+  return out;
 }
-inline std::expected<init_params, ratchet_error> x3dh(const x448_public& sender_key1, const x448_public& receiver_key1, const bytes& dh1,
-                                                      const bytes& dh2, const bytes& dh3, std::optional<init_params::kem_accepted> kem) {
+inline std::expected<init_params, ratchet_error> x3dh(const x448_public& sender_key1, const x448_public& receiver_key1, const dh_secret& dh1,
+                                                      const dh_secret& dh2, const dh_secret& dh3, std::optional<init_params::kem_accepted> kem) {
   init_params out;
   out.associated.assign(sender_key1.raw.begin(), sender_key1.raw.end());
   out.associated.insert(out.associated.end(), receiver_key1.raw.begin(), receiver_key1.raw.end());
-  bytes secrets = dh1;
-  secrets.insert(secrets.end(), dh2.begin(), dh2.end());
-  secrets.insert(secrets.end(), dh3.begin(), dh3.end());
-  if (kem) secrets.insert(secrets.end(), kem->shared.begin(), kem->shared.end());
+  // The secrets together in one buffer of its full size, wiped when it goes:
+  // nothing reallocated, no copy left behind.
+  crypto::secret<3 * 56 + crypto::sntrup761::shared_size> secrets;
+  std::ranges::copy(dh1.raw, secrets.raw.begin());
+  std::ranges::copy(dh2.raw, secrets.raw.begin() + 56);
+  std::ranges::copy(dh3.raw, secrets.raw.begin() + 112);
+  std::size_t length = 168;
+  if (kem) std::ranges::copy(kem->shared.raw, secrets.raw.begin() + 168), length += crypto::sntrup761::shared_size;
   const bytes salt(64, 0);
-  const auto [hk, nhk, sk] = hkdf3(salt, secrets, "SimpleXX3DH");
-  out.send_header = key_of(hk), out.next_receive_header = key_of(nhk), out.root = key_of(sk);
+  const auto [hk, nhk, sk] = hkdf3(salt, std::span(secrets.raw).first(length), "SimpleXX3DH");
+  out.send_header = hk, out.next_receive_header = nhk, out.root = sk;
   out.kem = std::move(kem);
   return out;
 }
@@ -293,6 +309,9 @@ struct state {
   key32 next_send_header{}, next_receive_header{};
   // Keys of messages skipped, by the header key they came under and their number.
   std::map<key32, std::map<std::uint32_t, message_key>> skipped;
+  // The order they were kept in, oldest first: what eviction drops.
+  std::deque<std::pair<key32, std::uint32_t>> skipped_order;
+  std::deque<key32> skipped_chains;
 
   // Move-only: encrypting from an old copy would use a message key and IV
   // again -- the state is moved, not copied. The caller keeps the state as
@@ -309,6 +328,7 @@ struct state {
     out.support_kem = support_kem, out.enable_kem = enable_kem, out.send_kem = send_kem, out.receive_kem = receive_kem;
     out.root = root, out.send = send, out.receive = receive, out.ns = ns, out.nr = nr, out.pn = pn;
     out.next_send_header = next_send_header, out.next_receive_header = next_receive_header, out.skipped = skipped;
+    out.skipped_order = skipped_order, out.skipped_chains = skipped_chains;
     return out;
   }
 };
@@ -317,7 +337,8 @@ template <class S>
   requires std::same_as<std::remove_const_t<S>, state>
 auto snapshot_fields(S& s) {
   return std::tie(s.current, s.max_supported, s.associated, s.dh_own, s.kem, s.support_kem, s.enable_kem, s.send_kem, s.receive_kem, s.root,
-                  s.send, s.receive, s.ns, s.nr, s.pn, s.next_send_header, s.next_receive_header, s.skipped);
+                  s.send, s.receive, s.ns, s.nr, s.pn, s.next_send_header, s.next_receive_header, s.skipped, s.skipped_order,
+                  s.skipped_chains);
 }
 
 namespace detail {
@@ -326,23 +347,24 @@ namespace detail {
 // what X448 gave.
 inline std::expected<std::tuple<key32, key32, key32>, ratchet_error> root_kdf(const key32& root, const x448_public& theirs, const x448_private& mine,
                                                                              const std::optional<crypto::sntrup761::shared_secret>& kem) {
-  auto secret = dh(theirs, mine);
+  const auto secret = dh(theirs, mine);
   if (!secret) return std::unexpected(secret.error());
-  if (kem) secret->insert(secret->end(), kem->begin(), kem->end());
-  const auto [rk, ck, nhk] = hkdf3(root.raw, *secret, "SimpleXRootRatchet");
-  crypto::scrub(*secret);
-  return std::tuple{key_of(rk), key_of(ck), key_of(nhk)};
+  // DH and KEM secrets in one buffer of its full size, wiped when it goes.
+  crypto::secret<56 + crypto::sntrup761::shared_size> input;
+  std::ranges::copy(secret->raw, input.raw.begin());
+  std::size_t length = 56;
+  if (kem) std::ranges::copy(kem->raw, input.raw.begin() + 56), length += crypto::sntrup761::shared_size;
+  const auto [rk, ck, nhk] = hkdf3(root.raw, std::span(input.raw).first(length), "SimpleXRootRatchet");
+  return std::tuple{rk, ck, nhk};
 }
 inline std::tuple<key32, message_key, iv16> chain_kdf(const key32& chain) {
-  auto [ck, mk, ivs] = hkdf3(std::span<const byte>(), chain.raw, "SimpleXChainRatchet");
+  const auto [ck, mk, ivs] = hkdf3(std::span<const byte>(), chain.raw, "SimpleXChainRatchet");
   message_key m;
-  m.key = key_of(mk);
-  std::ranges::copy(std::span(ivs).first(16), m.iv.raw.begin());
+  m.key = mk;
+  std::ranges::copy(std::span(ivs.raw).first(16), m.iv.raw.begin());
   iv16 header_iv{};
-  std::ranges::copy(std::span(ivs).subspan(16, 16), header_iv.raw.begin());
-  key32 next = key_of(ck);
-  crypto::scrub(ck), crypto::scrub(mk), crypto::scrub(ivs);
-  return {next, m, header_iv};
+  std::ranges::copy(std::span(ivs.raw).subspan(16, 16), header_iv.raw.begin());
+  return {ck, m, header_iv};
 }
 inline std::size_t padded_header_length(std::uint16_t version, bool support_kem) { return support_kem && version >= pq_version ? 2310 : 88; }
 template <class Out>
@@ -521,17 +543,41 @@ inline std::expected<void, ratchet_error> skip(state& s, std::uint32_t until) {
   if (s.nr > until + 1) return std::unexpected(errors::earlier{s.nr - until - 1});
   if (s.nr == until + 1) return std::unexpected(errors::duplicate{});
   if (s.nr + max_skip < until) return std::unexpected(errors::too_many_skipped{until + 1 - s.nr});
+  if (s.nr == until) return {};
+  // A chain skipped in for the first time: the oldest dropped past the limit.
+  if (!s.skipped.contains(s.receive->header)) {
+    s.skipped_chains.push_back(s.receive->header);
+    while (s.skipped_chains.size() > max_skipped_chains) {
+      s.skipped.erase(s.skipped_chains.front());
+      s.skipped_chains.pop_front();
+    }
+  }
+  // Room made, the oldest keys first (those already used are gone from the map).
   std::size_t held = 0;
   for (const auto& [hk, keys] : s.skipped) held += keys.size();
-  if (held + (until - s.nr) > max_skipped_total) return std::unexpected(errors::too_many_skipped{until + 1 - s.nr});
+  while (held + (until - s.nr) > max_skipped_total && !s.skipped_order.empty()) {
+    const auto [hk, n] = s.skipped_order.front();
+    s.skipped_order.pop_front();
+    if (const auto chain = s.skipped.find(hk); chain != s.skipped.end() && chain->second.erase(n) == 1) {
+      --held;
+      if (chain->second.empty()) s.skipped.erase(chain);
+    }
+  }
   auto& keys = s.skipped[s.receive->header];
   while (s.nr < until) {
     const auto [chain, key, ignored] = chain_kdf(s.receive->chain);
     keys[s.nr] = key;
+    s.skipped_order.emplace_back(s.receive->header, s.nr);
     s.receive->chain = chain;
     ++s.nr;
   }
-  if (keys.empty()) s.skipped.erase(s.receive->header);
+  // The order kept no longer than what it orders, entries used or dropped pruned from its front.
+  while (!s.skipped_order.empty()) {
+    const auto& [hk, n] = s.skipped_order.front();
+    const auto chain = s.skipped.find(hk);
+    if (chain != s.skipped.end() && chain->second.contains(n)) break;
+    s.skipped_order.pop_front();
+  }
   return {};
 }
 }  // namespace detail

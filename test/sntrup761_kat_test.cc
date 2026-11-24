@@ -82,7 +82,7 @@ TEST(Sntrup761, KnownAnswerAsLiboqs) {
   hex(record, "pk = ", keys.pub.raw);
   hex(record, "sk = ", keys.secret.raw);
   hex(record, "ct = ", sent.cipher);
-  hex(record, "ss = ", sent.shared);
+  hex(record, "ss = ", sent.shared.raw);
   const auto as_bytes = record | std::views::transform([](char c) { return std::bit_cast<byte>(c); }) | std::ranges::to<quay::bytes>();
   const auto digest = quay::crypto::sha256(as_bytes);
   std::string got;
