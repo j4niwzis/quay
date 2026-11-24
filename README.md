@@ -44,6 +44,46 @@ already used, which breaks AES-GCM for those messages. Record
 so that an older snapshot is refused rather than silently reused. A snapshot
 holds private and chain keys: keep it as secret as the keys themselves.
 
+## A bot, in outline
+
+Everything is sans-IO: quay never opens a socket or reads a clock. A bot
+owns its sockets and its loop, and moves bytes and values between them
+and quay's state machines. `test/live_client.cc` is this outline, whole and
+tested live.
+
+```cpp
+const int fd = connect_to(router);                 // TCP to the router's host and port
+client::router_session session(router);            // TLS, the router authenticated, the hellos
+auto [address, first] = connection::address::create(router, rng);
+session.submit(ADDRESS, first, rng);               // held until the session is ready
+std::map<std::uint64_t, connection::joining> contacts;
+
+for (;;) {
+  write_all(fd, session.take_outgoing());
+  session.received(read_some(fd));
+  for (auto& in : session.take_incoming())
+    spl::visit(spl::overloaded{
+        [&](const client::incoming::answered& a) { /* the machine `a.tag` named: answered(a.action_id, a.response) */ },
+        [&](const client::incoming::delivered& d) { /* the machine that owns(d.queue_id): delivered(d.queue_id, d.message) */ },
+        [&](const client::incoming::ready&) {}, [&](const client::incoming::alive&) {},
+        [&](const client::incoming::failed& f) { /* reconnect: a new session, then each machine's subscribe() */ }},
+      in);
+}
+```
+
+Each machine's calls return a `connection::output`: actions, submitted to
+the session under the machine's tag, and events --
+`event::contact_request` (accept it with `joining::join`), `connected`,
+`message` (read it with `chat::messages_of`; answer with
+`chat::body_of(chat::message_of(...))` and `send()`), `received` (a
+receipt), and the rest. **Save each machine (`saved()`) after every call
+that returns actions, before submitting them** -- see above.
+
+Files go through `quay.xftp` and `quay.xfile` with a session per XFTP
+router; groups are connections too (`chat::event::group_invite`,
+`group_member_intro`, ...); sends through a proxy are
+`router_session::submit_via_proxy`.
+
 ## Building
 
 CMake 4.3, clang 23 with libc++ (`import std`). Botan and zstd are fetched
