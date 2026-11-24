@@ -87,10 +87,11 @@ struct confirmed {  // the other side's confirmation: its connection info
   bytes info;
 };
 struct connected {};
-struct message {  // a message from the other side: its id, and whether it is the one expected
+struct message {  // a message from the other side: its id, whether it is the one expected, and its hash (for a receipt)
   std::uint64_t id = 0;
   bytes body;
   bool in_sequence = true;
+  bytes hash;
 };
 struct received {  // a receipt for a message sent
   std::uint64_t id = 0;
@@ -166,6 +167,23 @@ class duplex {
                     d.flow_, d.awaiting_, d.got_hello_);
   }
 
+  // A receipt for messages received (A_RCVD): each by its id and hash, as
+  // event::message gave them, with what the chat says of it (`info`, often
+  // empty). The other side marks those messages delivered.
+  template <crypto::random_source R>
+  std::expected<output, std::string> send_receipt(std::span<const agent::receipt> receipts, R& random) {
+    if (!ratchet_ || !snd_queue_ || !connected_) return std::unexpected("not connected");
+    if (receipts.empty()) return std::unexpected("no receipt");
+    const std::uint64_t id = ++snd_message_id_;
+    bytes plain;
+    agent::put_agent_message(plain, agent::agent_message::message{{id, snd_previous_hash_},
+                                                                  agent::a_message::received{std::vector(receipts.begin(), receipts.end())}});
+    output out;
+    if (auto sent = send_agent_message(plain, random, out); !sent) return std::unexpected(sent.error());
+    snd_previous_hash_ = agent::message_hash(plain);
+    return out;
+  }
+
  protected:
   action act(const smp::router& where, bytes entity, smp::command_t command, authorization_t auth) {
     return action{++actions_, where, std::move(entity), std::move(command), std::move(auth)};
@@ -224,7 +242,9 @@ class duplex {
                      const bool in_sequence = m.header.id == rcv_message_id_ + 1 && m.header.previous_hash == rcv_previous_hash_;
                      rcv_message_id_ = m.header.id;
                      rcv_previous_hash_ = agent::message_hash(*plain);
-                     spl::visit(spl::overloaded{[&](const agent::a_message::msg& x) { out.events.push_back(event::message{m.header.id, x.body, in_sequence}); },
+                     spl::visit(spl::overloaded{[&](const agent::a_message::msg& x) {
+                                                  out.events.push_back(event::message{m.header.id, x.body, in_sequence, rcv_previous_hash_});
+                                                },
                                                 [&](const agent::a_message::received& x) {
                                                   for (const auto& r : x.receipts) out.events.push_back(event::received{r.message_id});
                                                 },

@@ -58,6 +58,7 @@ std::uint16_t agreed = 0;
 std::optional<session::verified> verified;
 crypto::system_random rng;
 std::map<smp::corr_id, std::uint64_t> pending;
+std::vector<agent::receipt> to_receipt;  // messages to send a receipt for
 void send_all(std::span<const byte> data) {
   while (!data.empty()) {
     const auto n = ::send(fd, data.data(), data.size(), 0);
@@ -97,6 +98,13 @@ void perform(const connection::output& out, bool& is_connected) {
                                  is_connected = true;
                                },
                                [](const connection::event::message& x) {
+                                 // A chat message from the CLI: a receipt for it (sent by the loop).
+                                 if (const auto chats = chat::messages_of(x.body)) {
+                                   for (const auto& m : *chats)
+                                     spl::visit(spl::overloaded{[&](const chat::event::message_new&) { to_receipt.push_back(agent::receipt{x.id, x.hash, {}}); },
+                                                                [](const auto&) {}},
+                                                m.params.data());
+                                 }
                                  std::println("event: message {}{}", x.id, x.in_sequence ? "" : " (out of sequence)");
                                  const auto chats = chat::messages_of(x.body);
                                  if (!chats) return std::println("  not a chat message: {}", shown(x.body));
@@ -141,11 +149,13 @@ int main(int, char** argv) {
     agreed = verified->version();
     send_all(*smp::client_hello(agreed, router.identity));
 
-    const std::string profile = R"({"v":"1-22","event":"x.info","params":{"profile":{"displayName":"quay state machine","fullName":""}}})";
+    const std::string name = std::format("quay{}", ::getpid());
+    std::println("our name: {}", name);
+    const std::string profile = std::format(R"({{"v":"1-22","event":"x.info","params":{{"profile":{{"displayName":"{}","fullName":""}}}}}})", name);
     auto joined = connection::joining::join(inv, router, bytes(profile.begin(), profile.end()), rng, flow_asked());
     if (!joined) throw std::runtime_error(joined.error());
     auto& [conn, first] = *joined;
-    bool is_connected = false, sent = false;
+    bool is_connected = false, sent = false, receipted = false;
     perform(first, is_connected);
     for (int i = 0; i < 40; ++i) {
       bytes block;
@@ -163,6 +173,14 @@ int main(int, char** argv) {
         } else if (t.correlation && pending.contains(*t.correlation)) {
           perform(conn.answered(pending[*t.correlation], *r, rng), is_connected);
         }
+      }
+      if (!to_receipt.empty()) {
+        auto out = conn.send_receipt(to_receipt, rng);
+        if (!out) throw std::runtime_error(out.error());
+        std::println("sending a receipt for message {}", to_receipt.front().message_id);
+        perform(*out, is_connected);
+        to_receipt.clear();
+        receipted = true;
       }
       if (is_connected && !sent) {
         // As a program restarted would: the connection saved, and taken back from the bytes alone.
@@ -184,8 +202,10 @@ int main(int, char** argv) {
         sent = true;
       }
     }
-    std::println("live connection: {}", is_connected && sent ? "passed" : "FAILED");
-    return is_connected && sent ? 0 : 1;
+    // Where the CLI was asked to say something (QUAY_CLI_SAYS), a receipt sent for it too.
+    const bool ok = is_connected && sent && (!std::getenv("QUAY_CLI_SAYS") || receipted);
+    std::println("live connection: {}", ok ? "passed" : "FAILED");
+    return ok ? 0 : 1;
   } catch (const std::exception& failed) {
     std::println("live connection: FAILED: {}", failed.what());
     return 1;

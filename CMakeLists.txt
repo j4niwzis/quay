@@ -180,6 +180,8 @@ if(QUAY_TESTS)
     add_test(NAME live_invite_standard COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_invite.sh $<TARGET_FILE:quay-live_invite>)
     add_test(NAME live_connection_standard COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli.sh $<TARGET_FILE:quay-live_connection>)
     set_tests_properties(live_invite_standard live_connection_standard PROPERTIES ENVIRONMENT QUAY_FLOW=standard)
+    # The CLI speaks first once connected; quay's receipt marks its message delivered.
+    set_tests_properties(live_connection PROPERTIES ENVIRONMENT "QUAY_CLI_SAYS=hello quay, a receipt please")
     # quay's own address: the CLI's contact request, accepted.
     add_executable(quay-live_address test/live_address.cc)
     target_link_libraries(quay-live_address PRIVATE quay)
