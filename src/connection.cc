@@ -856,9 +856,12 @@ class inviting : public detail::duplex {
 // joining the invitation it carries (joining::join).
 class address : public detail::duplex {
  public:
+  // `client_data`: what the link says for the program reading it (a chat's
+  // group link names its group link id there).
   template <crypto::random_source R>
-  static std::pair<address, output> create(smp::router router, R& random) {
+  static std::pair<address, output> create(smp::router router, R& random, std::optional<std::string> client_data = std::nullopt) {
     address a;
+    a.client_data_ = std::move(client_data);
     a.rcv_router_ = std::move(router);
     a.rcv_auth_ = crypto::generate<curve::ed25519>(random);
     a.rcv_router_dh_ = crypto::generate<curve::x25519>(random);
@@ -882,6 +885,7 @@ class address : public detail::duplex {
     agent::link::contact link;
     link.queues.push_back(agent::queue_uri{{1, agent::current_client_version},
                                            {rcv_router_, rcv_snd_id_, rcv_e2e_.pub, agent::queue_mode_t(agent::queue_mode::contact{})}});
+    link.client_data = client_data_;
     out.events.push_back(event::address{agent::text_of(agent::link_t(link))});
     return out;
   }
@@ -915,8 +919,11 @@ class address : public detail::duplex {
     requires std::same_as<std::remove_const_t<D>, address>
   friend auto snapshot_fields(D& d) {
     using base = std::conditional_t<std::is_const_v<D>, const detail::duplex, detail::duplex>;
-    return snapshot_fields(static_cast<base&>(d));
+    return std::tuple_cat(snapshot_fields(static_cast<base&>(d)), std::tie(d.client_data_));
   }
+
+ private:
+  std::optional<std::string> client_data_;
 };
 
 }  // namespace quay::connection

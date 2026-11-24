@@ -31,7 +31,7 @@ and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, files both ways over XFTP, save/restore, re-subscription and queue switching
 both ways -- over quay's own TLS.
 
-Not yet: blocking and member restrictions, hosting a group link.
+Not yet: blocking and member restrictions.
 
 ## Keeping a connection: save before you send
 

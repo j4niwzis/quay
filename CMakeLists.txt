@@ -216,6 +216,10 @@ if(QUAY_TESTS)
     add_executable(quay-live_group_link test/live_group_link.cc)
     target_link_libraries(quay-live_group_link PRIVATE quay)
     add_test(NAME live_group_link COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_group_link.sh $<TARGET_FILE:quay-live_group_link>)
+    # quay hosting a group's link: the CLI's request accepted with x.grp.link.inv, messages both ways.
+    add_executable(quay-live_group_link_host test/live_group_link_host.cc)
+    target_link_libraries(quay-live_group_link_host PRIVATE quay)
+    add_test(NAME live_group_link_host COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_group_link_host.sh $<TARGET_FILE:quay-live_group_link_host>)
     # A bot's shape: one router session (quay.client) for an address and the contact it accepts.
     add_executable(quay-live_client test/live_client.cc)
     target_link_libraries(quay-live_client PRIVATE quay)
