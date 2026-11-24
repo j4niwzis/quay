@@ -111,6 +111,16 @@ jobs:
           for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/15225) 2>/dev/null && break; sleep 0.2; done
           echo "QUAY_SMP_FINGERPRINT=$(sudo cat /etc/opt/simplex/fingerprint)" >> "$GITHUB_ENV"
           echo "QUAY_SMP_ADDRESS=127.0.0.1:15225" >> "$GITHUB_ENV"
+          # simplex-chat's CLI on that router, its WebSocket API on 5225, for
+          # the tests that join its invitations and invite it.
+          curl -sSL -o /tmp/simplex-chat "https://github.com/simplex-chat/simplex-chat/releases/download/v7.1.4/simplex-chat-ubuntu-24_04-x86_64"
+          chmod +x /tmp/simplex-chat
+          mkdir -p /tmp/chat
+          fingerprint=$(sudo cat /etc/opt/simplex/fingerprint)
+          (cd /tmp/chat && HOME=/tmp/chat setsid nohup /tmp/simplex-chat -d /tmp/chat/cli --user-display-name cli \
+            -s "smp://${fingerprint}@127.0.0.1:15223" --smp-proxy never -p 5225 -y < /dev/null > /tmp/chat/cli.log 2>&1 &)
+          for i in $(seq 1 100); do (exec 3<>/dev/tcp/127.0.0.1/5225) 2>/dev/null && break; sleep 0.3; done
+          (exec 3<>/dev/tcp/127.0.0.1/5225) 2>/dev/null || { echo "the CLI did not start"; cat /tmp/chat/cli.log; exit 1; }
 
       - name: test
         run: ctest --test-dir build --output-on-failure
