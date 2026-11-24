@@ -198,6 +198,10 @@ if(QUAY_TESTS)
     add_executable(quay-live_chat_file test/live_chat_file.cc)
     target_link_libraries(quay-live_chat_file PRIVATE quay)
     add_test(NAME live_chat_file COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_file.sh $<TARGET_FILE:quay-live_chat_file>)
+    # A group of the CLI's, joined: invited, our member connection made, messages both ways.
+    add_executable(quay-live_group test/live_group.cc)
+    target_link_libraries(quay-live_group PRIVATE quay)
+    add_test(NAME live_group COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/live_cli_group.sh $<TARGET_FILE:quay-live_group>)
     # A bot's shape: one router session (quay.client) for an address and the contact it accepts.
     add_executable(quay-live_client test/live_client.cc)
     target_link_libraries(quay-live_client PRIVATE quay)

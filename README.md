@@ -31,7 +31,7 @@ and accepts it on quay's own, by both flows; messages, receipts, compressed
 chat, files both ways over XFTP, save/restore, re-subscription and queue switching
 both ways -- over quay's own TLS.
 
-Not yet: groups, private message routing.
+Not yet: groups beyond joining one and talking with its host (other members, forwarding, admin), private message routing.
 
 ## Keeping a connection: save before you send
 

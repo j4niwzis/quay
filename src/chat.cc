@@ -114,6 +114,50 @@ struct reaction {
 };
 consteval auto json_schema(knot::type<reaction>) { return knot::schema<reaction>(); }
 
+// ---- groups -------------------------------------------------------------------------
+
+// A member, as the protocol names one: its id (base64) and its role
+// ("owner", "admin", "member", ... -- kept as text: what roles allow is
+// not decided here).
+struct member_id_role {
+  std::string member_id;
+  std::string member_role;
+};
+consteval auto json_schema(knot::type<member_id_role>) {
+  return knot::schema<member_id_role>().member<"member_id">(knot::key("memberId")).member<"member_role">(knot::key("memberRole"));
+}
+struct group_profile {
+  std::string display_name;
+  std::string full_name;
+  std::optional<std::string> description, image;
+  std::optional<knot::raw> group_preferences;
+};
+consteval auto json_schema(knot::type<group_profile>) {
+  return knot::schema<group_profile>()
+      .member<"display_name">(knot::key("displayName"))
+      .member<"full_name">(knot::key("fullName"))
+      .member<"group_preferences">(knot::key("groupPreferences"));
+}
+// An invitation to a group: who invites, the member we are to be, the
+// invitation link our member connection joins, the group itself.
+struct group_invitation {
+  member_id_role from_member;
+  member_id_role invited_member;
+  std::string connection_link;
+  chat::group_profile group_profile;
+  std::optional<std::string> group_link_id;
+  std::optional<std::int64_t> group_size;
+};
+consteval auto json_schema(knot::type<group_invitation>) {
+  return knot::schema<group_invitation>()
+      .member<"from_member">(knot::key("fromMember"))
+      .member<"invited_member">(knot::key("invitedMember"))
+      .member<"connection_link">(knot::key("connRequest"))
+      .member<"group_profile">(knot::key("groupProfile"))
+      .member<"group_link_id">(knot::key("groupLinkId"))
+      .member<"group_size">(knot::key("groupSize"));
+}
+
 // ---- the events, each its params ---------------------------------------------
 
 namespace event {
@@ -163,6 +207,26 @@ consteval auto json_schema(knot::type<file_description>) {
       .member<"description">(knot::key("fileDescr"))
       .tag("x.msg.file.descr");
 }
+struct group_invite {  // x.grp.inv
+  chat::group_invitation group_invitation;
+};
+consteval auto json_schema(knot::type<group_invite>) {
+  return knot::schema<group_invite>().member<"group_invitation">(knot::key("groupInvitation")).tag("x.grp.inv");
+}
+struct group_accept {  // x.grp.acpt: the connection info a member joining says
+  std::string member_id;
+  std::optional<chat::profile> profile;
+};
+consteval auto json_schema(knot::type<group_accept>) {
+  return knot::schema<group_accept>().member<"member_id">(knot::key("memberId")).tag("x.grp.acpt");
+}
+struct group_member_info {  // x.grp.mem.info: the host's, on our member connection
+  std::string member_id;
+  chat::profile profile;
+};
+consteval auto json_schema(knot::type<group_member_info>) {
+  return knot::schema<group_member_info>().member<"member_id">(knot::key("memberId")).tag("x.grp.mem.info");
+}
 struct direct_delete {};  // x.direct.del: the contact deleted us
 consteval auto json_schema(knot::type<info>) { return knot::schema<info>().tag("x.info"); }
 consteval auto json_schema(knot::type<info_probe>) { return knot::schema<info_probe>().tag("x.info.probe"); }
@@ -193,6 +257,7 @@ consteval auto json_schema(knot::type<direct_delete>) { return knot::schema<dire
 // The params, chosen by the event; any other event's kept as its JSON text.
 using params_t = knot::tagged<"event", event::info, event::info_probe, event::info_probe_check, event::info_probe_ok, event::ok,
                               event::message_new, event::message_update, event::message_delete, event::message_react, event::file_description,
+                              event::group_invite, event::group_accept, event::group_member_info,
                               event::direct_delete, knot::raw>;
 
 struct message {
